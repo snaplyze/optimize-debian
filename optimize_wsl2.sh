@@ -1,0 +1,3198 @@
+#!/bin/bash
+# shellcheck disable=SC1091
+
+# Force C locale for script execution to avoid locale-related issues
+export LC_ALL=C
+export LANG=C
+
+################################################################################
+# WSL2 Optimization Script for Debian 12/13 (Bookworm/Trixie) - v4
+# Purpose: Complete WSL2 optimization with modern Fish + Starship setup
+# Features: WSL2-specific configs, systemd, Docker, NVIDIA/CUDA support, performance tuning
+################################################################################
+
+set -Eeuo pipefail
+
+SCRIPT_VERSION="4.0"
+export DEBIAN_FRONTEND=noninteractive
+APT_UPDATED=0
+APT_INSTALL_OPTS=(-y -o Dpkg::Use-Pty=0 -o Acquire::Retries=3)
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_PATH="$(readlink -f "$SCRIPT_SOURCE" 2>/dev/null || printf '%s' "$SCRIPT_SOURCE")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+if [ -d "$SCRIPT_DIR" ]; then
+    SCRIPT_DIR="$(cd "$SCRIPT_DIR" 2>/dev/null && pwd)" || SCRIPT_DIR=""
+else
+    SCRIPT_DIR=""
+fi
+[ -n "$SCRIPT_DIR" ] || SCRIPT_DIR="$(pwd -P)"
+
+if [ -r "$SCRIPT_DIR/lib/common.sh" ]; then
+    # shellcheck source=lib/common.sh
+    source "$SCRIPT_DIR/lib/common.sh"
+fi
+if [ -r "$SCRIPT_DIR/lib/tui.sh" ]; then
+    # shellcheck source=lib/tui.sh
+    source "$SCRIPT_DIR/lib/tui.sh"
+fi
+
+if ! declare -F common_is_supported_debian_version >/dev/null; then
+    common_is_supported_debian_version() {
+        case "${1%%.*}" in
+            12|13) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    common_validate_username() {
+        local username="${1:-}"
+        [[ -z "$username" ]] && return 1
+        [[ "$username" =~ ^[0-9]+$ ]] && return 2
+        [[ "$username" =~ ^[-0-9] ]] && return 3
+        [[ ! "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && return 4
+        [[ ${#username} -gt 32 ]] && return 5
+        return 0
+    }
+
+    common_render_wsl_conf() {
+        local default_user="${1:-}"
+        cat <<'EOF'
+[boot]
+# Enable systemd for better service management
+# systemd allows Docker to auto-start via service configuration
+systemd=true
+
+[automount]
+# Enable metadata for proper file permissions
+enabled=true
+# Mount Windows drives to /mnt (standard WSL behavior)
+# C: will be /mnt/c, D: will be /mnt/d, etc.
+root=/mnt
+# Combined options: metadata for permissions, case sensitivity, umask for directories
+# Note: fmask removed to allow Windows executables (like VSCode scripts) to work
+options="metadata,case=dir,umask=022"
+
+[network]
+# Generate hosts file for local development
+generateHosts=true
+# Custom hostname
+hostname=debian-wsl
+
+[interop]
+# Enable Windows process integration
+enabled=true
+# Append Windows PATH for better tool access
+appendWindowsPath=true
+EOF
+        if [ -n "$default_user" ]; then
+            cat <<EOF
+
+[user]
+# Default user - login with this user instead of root
+default=${default_user}
+EOF
+        fi
+    }
+
+    common_render_docker_debian_source() {
+        local os_id="${1:-}"
+        local suite="${2:-}"
+        local architecture="${3:-}"
+        local signed_by="${4:-}"
+        [ -n "$os_id" ] && [ -n "$suite" ] && [ -n "$architecture" ] && [ -n "$signed_by" ] || return 1
+        cat <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/${os_id}
+Suites: ${suite}
+Components: stable
+Architectures: ${architecture}
+Signed-By: ${signed_by}
+EOF
+    }
+
+    common_render_debian_unattended_upgrades_conf() {
+        cat <<'EOF'
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+EOF
+    }
+
+    common_render_apt_periodic_auto_upgrades_conf() {
+        cat <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+EOF
+    }
+
+    common_user_home() {
+        local username="${1:-}"
+        [ -n "$username" ] || return 1
+        local entry home
+        entry="$(getent passwd "$username" 2>/dev/null || true)"
+        [ -n "$entry" ] || return 1
+        home="$(cut -d: -f6 <<<"$entry")"
+        [ -n "$home" ] || return 1
+        printf '%s\n' "$home"
+    }
+
+    common_safe_write_sudoers() {
+        local target_file="${1:-}"
+        local content="${2:-}"
+        [ -n "$target_file" ] && [ -n "$content" ] || return 1
+        mkdir -p "$(dirname "$target_file")"
+        printf '%s\n' "$content" > "$target_file"
+        chmod 440 "$target_file"
+        local visudo_bin
+        visudo_bin="$(command -v visudo 2>/dev/null || true)"
+        [ -n "$visudo_bin" ] || [ ! -x /usr/sbin/visudo ] || visudo_bin="/usr/sbin/visudo"
+        if [ -n "$visudo_bin" ] && [ -x "$visudo_bin" ]; then
+            if ! "$visudo_bin" -cf "$target_file" >/dev/null 2>&1; then
+                rm -f "$target_file"
+                return 2
+            fi
+        fi
+        return 0
+    }
+fi
+
+if ! declare -F tui_detect_backend >/dev/null; then
+    : "${GUM:=/usr/local/bin/gum}"
+    : "${TUI_GUM_VERSION:=0.17.0}"
+    : "${TUI_AUTO_INSTALL_GUM:=true}"
+
+    tui_gum_path() {
+        if [ -n "${TUI_GUM_BIN:-}" ] && [ -x "$TUI_GUM_BIN" ]; then
+            printf '%s\n' "$TUI_GUM_BIN"
+            return 0
+        fi
+        if [ -n "${GUM:-}" ] && [ -x "$GUM" ]; then
+            printf '%s\n' "$GUM"
+            return 0
+        fi
+        command -v gum 2>/dev/null || return 1
+    }
+
+    tui_gum_asset_arch() {
+        case "$(uname -m)" in
+            x86_64|amd64) printf '%s\n' "x86_64" ;;
+            aarch64|arm64) printf '%s\n' "arm64" ;;
+            armv7l) printf '%s\n' "armv7" ;;
+            *) uname -m ;;
+        esac
+    }
+
+    tui_install_gum() {
+        local gum_dir tmp_dir os_name arch dl_url checksum_url gum_checksum gum_path
+        command -v curl >/dev/null 2>&1 || return 1
+        command -v tar >/dev/null 2>&1 || return 1
+        command -v sha256sum >/dev/null 2>&1 || return 1
+        gum_dir="$(dirname "$GUM")"
+        mkdir -p "$gum_dir" 2>/dev/null || return 1
+        [ -w "$gum_dir" ] || return 1
+        tmp_dir="$(mktemp -d)"
+        os_name="$(uname -s)"
+        arch="$(tui_gum_asset_arch)"
+        dl_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/gum_${TUI_GUM_VERSION}_${os_name}_${arch}.tar.gz"
+        checksum_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/checksums.txt"
+        if ! curl -Lsf "$dl_url" >"${tmp_dir}/gum.tar.gz"; then rm -rf "$tmp_dir"; return 1; fi
+        if ! curl -Lsf "$checksum_url" >"${tmp_dir}/checksums.txt"; then rm -rf "$tmp_dir"; return 1; fi
+        gum_checksum="$(awk -v f="$(basename "$dl_url")" '$2==f{print $1}' "${tmp_dir}/checksums.txt")"
+        if [ -z "$gum_checksum" ] || ! echo "$gum_checksum  ${tmp_dir}/gum.tar.gz" | sha256sum -c - >/dev/null 2>&1; then rm -rf "$tmp_dir"; return 1; fi
+        if ! tar -xf "${tmp_dir}/gum.tar.gz" --directory "$tmp_dir"; then rm -rf "$tmp_dir"; return 1; fi
+        gum_path="$(find "$tmp_dir" -type f -executable -name "gum" -print -quit)"
+        if [ -z "$gum_path" ] || ! mv "$gum_path" "$GUM"; then rm -rf "$tmp_dir"; return 1; fi
+        chmod +x "$GUM" || { rm -rf "$tmp_dir"; return 1; }
+        TUI_GUM_BIN="$GUM"
+        rm -rf "$tmp_dir"
+    }
+
+    tui_init() {
+        local backend="${TUI_BACKEND:-auto}"
+        case "$backend" in
+            gum)
+                if ! tui_gum_path >/dev/null 2>&1 && [ "$TUI_AUTO_INSTALL_GUM" != "false" ]; then tui_install_gum || return 1; fi
+                TUI_RESOLVED_BACKEND="gum"
+                ;;
+            auto|"")
+                if tui_gum_path >/dev/null 2>&1; then
+                    TUI_RESOLVED_BACKEND="gum"
+                elif [ "$TUI_AUTO_INSTALL_GUM" != "false" ] && [ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" ] && [ -t 1 ]; then
+                    if tui_install_gum; then TUI_RESOLVED_BACKEND="gum"; else TUI_RESOLVED_BACKEND="plain"; fi
+                else
+                    TUI_RESOLVED_BACKEND="plain"
+                fi
+                ;;
+            plain|dialog|whiptail) TUI_RESOLVED_BACKEND="$backend" ;;
+            *) return 1 ;;
+        esac
+    }
+
+    tui_detect_backend() {
+        if [ -n "${TUI_RESOLVED_BACKEND:-}" ]; then
+            printf '%s\n' "$TUI_RESOLVED_BACKEND"
+            return 0
+        fi
+
+        case "${TUI_BACKEND:-auto}" in
+            gum)
+                tui_gum_path >/dev/null 2>&1 || return 1
+                printf '%s\n' "gum"
+                return 0
+                ;;
+            dialog|whiptail|plain) printf '%s\n' "$TUI_BACKEND"; return 0 ;;
+            auto|"") ;;
+            *) return 1 ;;
+        esac
+
+        if tui_gum_path >/dev/null 2>&1; then
+            printf '%s\n' "gum"
+            return 0
+        fi
+
+        printf '%s\n' "plain"
+    }
+
+    tui_has_visual_backend() {
+        local backend
+        backend="$(tui_detect_backend)" || return 1
+        case "$backend" in
+            gum) tui_gum_path >/dev/null 2>&1 ;;
+            dialog|whiptail) command -v "$backend" >/dev/null 2>&1 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    tui_gum() {
+        local gum_bin
+        gum_bin="$(tui_gum_path)" || return 1
+        "$gum_bin" "$@"
+    }
+
+    tui_prompt_yn() {
+        local prompt="$1"
+        local default_yes="$2"
+        local backend answer prompt_suffix
+        backend="$(tui_detect_backend)" || backend="plain"
+        if [ "$backend" = "gum" ] && tui_gum_path >/dev/null 2>&1; then
+            if $default_yes; then
+                tui_gum confirm --prompt.foreground 12 --selected.background 12 --selected.foreground 15 --unselected.foreground 12 "$prompt"
+            else
+                tui_gum confirm --default=false --prompt.foreground 12 --selected.background 12 --selected.foreground 15 --unselected.foreground 12 "$prompt"
+            fi
+            return $?
+        fi
+        if { [ "$backend" = "dialog" ] || [ "$backend" = "whiptail" ]; } && command -v "$backend" >/dev/null 2>&1; then
+            if $default_yes; then
+                "$backend" --yesno "$prompt" 8 70 3>&1 1>&2 2>&3
+            else
+                "$backend" --defaultno --yesno "$prompt" 8 70 3>&1 1>&2 2>&3
+            fi
+            return $?
+        fi
+        if $default_yes; then prompt_suffix="[Y/n]"; else prompt_suffix="[y/N]"; fi
+        read -r -p "${TUI_PROMPT_PREFIX:-}${prompt} ${prompt_suffix}: " answer || answer=""
+        case "$answer" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+            [nN]|[nN][oO]) return 1 ;;
+            "") $default_yes; return $? ;;
+            *) printf 'Invalid response. Please answer yes or no.\n' >&2; tui_prompt_yn "$prompt" "$default_yes" ;;
+        esac
+    }
+
+    tui_radiolist() {
+        local title="$1" prompt="$2" height="$3" width="$4" list_height="$5" backend
+        local tag label status choice
+        local options=()
+        shift 5
+        backend="$(tui_detect_backend)" || return 1
+        case "$backend" in
+            gum)
+                tui_gum_path >/dev/null 2>&1 || return 1
+                while [ "$#" -gt 0 ]; do
+                    tag="$1"
+                    label="${2:-}"
+                    status="${3:-off}"
+                    if [ "$status" = "on" ]; then
+                        options=("${tag} - ${label}" "${options[@]}")
+                    else
+                        options+=("${tag} - ${label}")
+                    fi
+                    shift 3
+                done
+                choice="$(tui_gum choose --cursor "> " --header.foreground 12 --cursor.foreground 12 --header "+ ${title}: ${prompt}" "${options[@]}")" || return 1
+                printf '%s\n' "${choice%% *}"
+                ;;
+            dialog|whiptail)
+                command -v "$backend" >/dev/null 2>&1 || return 1
+                "$backend" --title "$title" --radiolist "$prompt" "$height" "$width" "$list_height" "$@" 3>&1 1>&2 2>&3
+                ;;
+            plain) return 1 ;;
+        esac
+    }
+fi
+
+# Installation order (dependency-aware):
+#  1) Validate Debian 12/13 + WSL2
+#  2) Write /etc/wsl.conf early (takes effect only after full `wsl --shutdown`)
+#  3) Refresh/upgrade base system and install prerequisite packages
+#  4) Create/select the target user before writing user dotfiles
+#  5) Configure locales
+#  6) Configure shells, then install user-scoped toolchains (Go, fnm/Node)
+#  7) Install Docker from the official Docker Debian repository
+#  8) Layer NVIDIA Container Toolkit on top of Docker, then optional CUDA
+#  9) Apply performance/autoupdate/journald settings and create helper scripts
+# 10) Summarize any actions that require a post-install `wsl --shutdown`
+
+on_error() {
+    local exit_code=$?
+    local line_no=${1:-unknown}
+    error "Script failed at line ${line_no} with exit code ${exit_code}. Check ${LOG_FILE} for details."
+    exit "$exit_code"
+}
+trap 'on_error $LINENO' ERR
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VISUAL THEME - Modern, Clean, Professional
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+WHITE='\033[1;37m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# Symbols
+SYMBOL_DOT="•"
+SYMBOL_GEAR="⚙"
+SYMBOL_PACKAGE="📦"
+SYMBOL_ROCKET="🚀"
+SYMBOL_CHECK="✔"
+SYMBOL_WARN="⚠"
+SYMBOL_INFO="ℹ"
+
+# Logging
+LOG_FILE="/var/log/wsl2_optimization.log"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER FUNCTIONS - Clean TUI Output
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Log to file only (silent)
+log_silent() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
+ui_backend() {
+    local backend
+    backend="$(tui_detect_backend 2>/dev/null || true)"
+    printf '%s\n' "${backend:-plain}"
+}
+
+ui_has_gum() {
+    [ "$(ui_backend)" = "gum" ] && tui_gum_path >/dev/null 2>&1
+}
+
+ui_style() {
+    ui_has_gum && tui_gum style "$@"
+}
+
+ui_clean_heading() {
+    local text="$*"
+    local marker
+
+    for marker in \
+        "${SYMBOL_GEAR:-}" \
+        "${SYMBOL_PACKAGE:-}" \
+        "${SYMBOL_ROCKET:-}" \
+        "${SYMBOL_CHECK:-}" \
+        "${SYMBOL_WARN:-}" \
+        "${SYMBOL_INFO:-}"; do
+        [ -n "$marker" ] && text="${text//$marker/}"
+    done
+
+    text="${text#"${text%%[![:space:]]*}"}"
+    text="${text%"${text##*[![:space:]]}"}"
+    printf '%s\n' "$text"
+}
+
+ui_title() {
+    local text
+
+    text="$(ui_clean_heading "$*")"
+
+    if ! ui_style --foreground 12 --bold "+ ${text}"; then
+        echo -e "${BLUE}${BOLD}+ ${text}${NC}"
+    fi
+}
+
+ui_hint() {
+    local text="$1"
+
+    if ! ui_style --foreground 8 "  ${text}"; then
+        echo -e "  ${DIM}${text}${NC}"
+    fi
+}
+
+ui_success_title() {
+    local text="$1"
+
+    if ! ui_style --foreground 10 --bold "${text}"; then
+        echo -e "${GREEN}${BOLD}${text}${NC}"
+    fi
+}
+
+ui_option_state() {
+    local label="$1"
+    local enabled="$2"
+    local status color
+
+    if $enabled; then
+        status="enabled"
+        color=10
+    else
+        status="skipped"
+        color=8
+    fi
+
+    if ui_has_gum; then
+        tui_gum join \
+            "$(tui_gum style --foreground "$color" --bold "  -")" \
+            "$(tui_gum style --foreground 15 "$(printf ' %-42s' "$label")")" \
+            "$(tui_gum style --foreground "$color" --bold "$status")"
+    else
+        echo -e "  ${GREEN}-${NC} $(printf '%-42s' "$label") ${DIM}${status}${NC}"
+    fi
+}
+
+print_header() {
+    local line
+    local gum_active=false
+
+    ui_has_gum && gum_active=true
+    clear
+    echo ""
+
+    while IFS= read -r line; do
+        if $gum_active; then
+            tui_gum style --foreground 12 --bold "$line"
+        else
+            echo -e "${BLUE}${line}${NC}"
+        fi
+    done <<'EOF'
+ __        ______  _     ____
+ \ \      / / ___|| |   |___ \
+  \ \ /\ / /\___ \| |     __) |
+   \ V  V /  ___) | |___ / __/
+    \_/\_/  |____/|_____|_____|
+EOF
+
+    if $gum_active; then
+        tui_gum style --foreground 15 --bold --margin "1 0" "WSL2 Optimization for Debian 12/13  v${SCRIPT_VERSION}"
+        tui_gum style --foreground 8 "Systemd, Docker, CUDA, Fish, Node.js, Go and WSL tuning"
+    else
+        echo ""
+        echo -e "${BOLD}${WHITE}WSL2 Optimization for Debian 12/13  v${SCRIPT_VERSION}${NC}"
+        echo -e "${DIM}Systemd, Docker, CUDA, Fish, Node.js, Go and WSL tuning${NC}"
+    fi
+    echo ""
+}
+
+ui_message() {
+    local color="$1"
+    local label="$2"
+    local message="$3"
+
+    printf '  %b%-7s%b %s\n' "$color" "[$label]" "$NC" "$message"
+}
+
+# Success message
+log() {
+    ui_message "$GREEN" "ok" "$1"
+    log_silent "[OK] $1"
+}
+
+# Warning message
+warn() {
+    ui_message "$YELLOW" "warn" "$1"
+    log_silent "[WARN] $1"
+}
+
+# Error message
+error() {
+    ui_message "$RED" "error" "$1"
+    log_silent "[ERROR] $1"
+}
+
+# Info message
+info() {
+    ui_message "$BLUE" "info" "$1"
+    log_silent "[INFO] $1"
+}
+
+# Progress message (what is being done now)
+progress() {
+    ui_message "$CYAN" ".." "$1"
+    log_silent "[PROGRESS] $1"
+}
+
+# Section header
+section() {
+    local title
+
+    title="$(ui_clean_heading "$*")"
+    echo ""
+    ui_title "$title"
+    log_silent "========== $title =========="
+}
+
+# Subsection header
+subsection() {
+    local title
+
+    title="$(ui_clean_heading "$*")"
+    echo ""
+    if ! ui_style --foreground 13 --bold "  - ${title}"; then
+        echo -e "  ${MAGENTA}-${NC} ${BOLD}${title}${NC}"
+    fi
+    log_silent "--- $title ---"
+}
+
+# Run command silently, show error only on failure
+run_silent() {
+    local cmd="$*"
+    local output
+    local exit_code
+    
+    log_silent "Running: $cmd"
+    output=$(eval "$cmd" 2>&1) && exit_code=$? || exit_code=$?
+    
+    if [ $exit_code -ne 0 ]; then
+        error "Command failed: $cmd"
+        if [ -n "$output" ]; then
+            echo -e "    ${DIM}${output}${NC}" | head -5
+        fi
+        log_silent "FAILED: $output"
+        return $exit_code
+    fi
+    
+    log_silent "Success: $cmd"
+    return 0
+}
+
+require_command() {
+    local cmd="$1"
+    command -v "$cmd" >/dev/null 2>&1 || {
+        error "Required command not found: $cmd"
+        exit 1
+    }
+}
+
+restore_linux_home_path_ownership() {
+    local target_path="$1"
+    local desired_user="${2:-}"
+    local current_owner
+    local home_user
+
+    [ -e "$target_path" ] || return 0
+
+    if [ -z "$desired_user" ]; then
+        home_user=$(printf '%s\n' "$target_path" | sed -n 's#^/home/\([^/]\+\)/.*#\1#p')
+        if [ -n "$home_user" ] && id "$home_user" >/dev/null 2>&1; then
+            desired_user="$home_user"
+        fi
+    fi
+
+    [ -n "$desired_user" ] || return 0
+
+    current_owner=$(stat -c '%U' "$target_path" 2>/dev/null || true)
+    if [ "$current_owner" != "$desired_user" ]; then
+        chown "$desired_user:$desired_user" "$target_path" 2>/dev/null || true
+        chmod u+rw "$target_path" 2>/dev/null || true
+    fi
+}
+
+apt_update_once() {
+    wait_for_dpkg_lock || return 1
+    if [ "$APT_UPDATED" -eq 0 ]; then
+        local apt_output
+        local apt_status
+
+        progress "Refreshing APT package index..."
+        apt_output=$(apt-get update 2>&1) && apt_status=0 || apt_status=$?
+        log_silent "$apt_output"
+
+        if [ $apt_status -ne 0 ]; then
+            error "APT package index refresh failed"
+            if [ -n "$apt_output" ]; then
+                echo -e "    ${DIM}${apt_output}${NC}" | head -5
+            fi
+            return $apt_status
+        fi
+
+        if printf '%s\n' "$apt_output" | grep -Eqi '(^W: Failed to fetch|An error occurred during the signature verification|OpenPGP signature verification failed|EXPKEYSIG|NO_PUBKEY|not live until)'; then
+            warn "APT package index refresh completed with repository verification errors"
+            if printf '%s\n' "$apt_output" | grep -Eqi 'not live until'; then
+                warn "WSL clock appears out of sync. Run 'wsl --shutdown' in Windows, reopen WSL, verify the current time, then rerun the script."
+            fi
+            return 1
+        fi
+
+        APT_UPDATED=1
+    fi
+}
+
+run_as_user() {
+    local username="$1"
+    shift
+    if [ "$username" = "root" ]; then
+        "$@"
+    else
+        su - "$username" -c "$(printf '%q ' "$@")"
+    fi
+}
+
+# Wait for dpkg/apt lock to be released
+wait_for_dpkg_lock() {
+    local max_wait=300
+    local wait_time=0
+    local check_interval=2
+
+    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
+          fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+
+        if [ $wait_time -ge $max_wait ]; then
+            error "Timeout waiting for dpkg lock after ${max_wait}s"
+            return 1
+        fi
+
+        if [ $wait_time -eq 0 ]; then
+            info "Waiting for other package managers to finish..."
+        fi
+
+        sleep $check_interval
+        wait_time=$((wait_time + check_interval))
+    done
+
+    [ $wait_time -gt 0 ] && sleep 1
+    return 0
+}
+
+# Check if package is available in repositories
+package_available() {
+    local pkg="$1"
+
+    LC_ALL=C apt-cache show --no-all-versions "$pkg" >/dev/null 2>&1 && return 0
+
+    LC_ALL=C apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate:[[:space:]]*(none)" && return 1
+    LC_ALL=C apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate:" && return 0
+
+    return 1
+}
+
+# Safe package installation with availability check (silent output)
+safe_install() {
+    local packages=("$@")
+    local available_packages=()
+    local unavailable_packages=()
+    local failed_packages=()
+
+    wait_for_dpkg_lock || return 1
+
+    # Update package index once per run
+    apt_update_once || return 1
+    
+    for pkg in "${packages[@]}"; do
+        if package_available "$pkg"; then
+            available_packages+=("$pkg")
+        else
+            unavailable_packages+=("$pkg")
+        fi
+    done
+    
+    if [ ${#available_packages[@]} -gt 0 ]; then
+        progress "Installing ${#available_packages[@]} packages..."
+        if ! apt-get install "${APT_INSTALL_OPTS[@]}" "${available_packages[@]}" >/dev/null 2>&1; then
+            # Retry with individual packages on failure
+            for pkg in "${available_packages[@]}"; do
+                if ! apt-get install "${APT_INSTALL_OPTS[@]}" "$pkg" >/dev/null 2>&1; then
+                    failed_packages+=("$pkg")
+                    warn "Failed to install: $pkg"
+                fi
+            done
+        fi
+        if [ ${#failed_packages[@]} -eq 0 ]; then
+            log "Packages installed successfully"
+        else
+            warn "Package installation incomplete: ${failed_packages[*]}"
+        fi
+    fi
+    
+    if [ ${#unavailable_packages[@]} -gt 0 ]; then
+        warn "Unavailable packages: ${unavailable_packages[*]}"
+    fi
+}
+
+is_supported_debian_version() {
+    common_is_supported_debian_version "${1:-}"
+}
+
+require_supported_debian_release() {
+    if [[ "$ID" != "debian" ]]; then
+        error "This script requires Debian. Detected: ${ID:-unknown}"
+        exit 1
+    fi
+
+    if ! is_supported_debian_version "${VERSION_ID:-}"; then
+        error "This script supports Debian 12 (Bookworm) and Debian 13 (Trixie) on WSL2."
+        error "Detected: ${ID:-unknown} ${VERSION_ID:-unknown}"
+        exit 1
+    fi
+}
+
+resolve_fetch_packages() {
+    if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
+        case "${VERSION_ID%%.*}" in
+            13) printf '%s\n' "fastfetch" ;;
+            12) printf '%s\n' "neofetch" ;;
+        esac
+        return 0
+    fi
+
+    apt_update_once >/dev/null 2>&1 || true
+
+    if package_available fastfetch; then
+        printf '%s\n' "fastfetch"
+    elif package_available neofetch; then
+        printf '%s\n' "neofetch"
+    fi
+}
+
+resolve_fetch_command() {
+    if command -v fastfetch >/dev/null 2>&1; then
+        printf '%s\n' "fastfetch"
+    elif command -v neofetch >/dev/null 2>&1; then
+        printf '%s\n' "neofetch"
+    fi
+}
+
+resolve_cuda_distro() {
+    if is_supported_debian_version "$1"; then
+        printf 'debian%s\n' "${1%%.*}"
+        return 0
+    fi
+
+    return 1
+}
+
+cuda_package_available() {
+    local package="$1"
+    apt-cache show "$package" >/dev/null 2>&1
+}
+
+resolve_cuda_toolkit_package() {
+    local package
+    local preferred_packages=(
+        cuda-toolkit
+        cuda-toolkit-13
+        cuda-toolkit-13-2
+        cuda-toolkit-13-1
+        cuda-toolkit-13-0
+        cuda-toolkit-12-9
+        cuda-toolkit-12-8
+        cuda-toolkit-12-6
+        cuda-toolkit-12-5
+        cuda-toolkit-12-4
+        cuda-toolkit-12-3
+    )
+
+    for package in "${preferred_packages[@]}"; do
+        if cuda_package_available "$package"; then
+            printf '%s\n' "$package"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+render_wsl_conf() {
+    common_render_wsl_conf "${1:-}"
+}
+
+if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
+    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+        return 0
+    fi
+    exit 0
+fi
+
+# WSL2 detection functions
+is_wsl() {
+    grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
+}
+
+has_systemd() {
+    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+is_wsl2() {
+    grep -qiE '(wsl2|microsoft-standard-WSL2)' /proc/sys/kernel/osrelease 2>/dev/null ||     grep -qiE '(wsl2|microsoft-standard-WSL2)' /proc/version 2>/dev/null
+}
+
+service_actions_available() {
+    has_systemd && [ "${WSL_RESTART_REQUIRED:-false}" != "true" ]
+}
+
+note_post_restart() {
+    local message="$1"
+    POST_RESTART_NOTES+=("$message")
+}
+
+has_user_systemd() {
+    systemctl --user show-environment >/dev/null 2>&1
+}
+
+sudo_or_su() {
+    if command -v sudo >/dev/null 2>&1; then
+        sudo "$@"
+    else
+        su -c "$*"
+    fi
+}
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   error "This script must be run as root (use sudo)"
+   exit 1
+fi
+
+POST_RESTART_NOTES=()
+
+# Verify WSL2 environment
+if ! is_wsl; then
+    error "This script must be run inside WSL."
+    exit 1
+fi
+
+if ! grep -qiE 'wsl2|microsoft-standard-WSL2' /proc/sys/kernel/osrelease 2>/dev/null; then
+    error "WSL was detected, but this script requires WSL2 specifically."
+    error "Current kernel: $(cat /proc/sys/kernel/osrelease 2>/dev/null || echo unknown)"
+    exit 1
+fi
+log "WSL2 kernel confirmed"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# START BANNER
+# ══════════════════════════════════════════════════════════════════════════════
+tui_init || true
+print_header
+log_silent "=== Starting WSL2 Optimization for Debian 12/13 v${SCRIPT_VERSION} ==="
+
+################################################################################
+# 1. Detect OS Version
+################################################################################
+section "${SYMBOL_GEAR} System Detection"
+
+# Detect OS
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_NAME=$NAME
+    OS_VERSION=$VERSION_ID
+    OS_CODENAME=$VERSION_CODENAME
+    log "Detected OS: $OS_NAME $OS_VERSION ($OS_CODENAME)"
+else
+    error "Cannot detect OS version. /etc/os-release not found."
+    exit 1
+fi
+
+require_supported_debian_release
+if ! is_wsl; then
+    error "This script must be run inside WSL."
+    exit 1
+fi
+if ! is_wsl2; then
+    error "WSL detected, but this script requires WSL2."
+    exit 1
+fi
+log "Debian ${VERSION_ID} (${VERSION_CODENAME}) on WSL2 confirmed"
+
+################################################################################
+# 2. Interactive Configuration Menu
+################################################################################
+
+# Default configuration flags
+CONFIGURE_WSL_CONF=true
+UPDATE_SYSTEM=true
+INSTALL_BASE_UTILS=true
+CREATE_USER=false
+USER_WAS_CREATED=false
+CONFIGURE_LOCALES=true
+INSTALL_FISH=true
+INSTALL_DOCKER=true
+INSTALL_NVIDIA=false
+INSTALL_CUDA=false
+CONFIGURE_SSH_AGENT=true
+INSTALL_GO=true
+INSTALL_NODE=true
+ENABLE_AUTO_UPDATES=true
+PERFORMANCE_TUNING=true
+CONFIGURE_JOURNALD=true
+WSL_RESTART_REQUIRED=false
+
+show_selected_options() {
+    subsection "Selected profile"
+    ui_option_state "WSL2 systemd configuration" "$CONFIGURE_WSL_CONF"
+    ui_option_state "System package update" "$UPDATE_SYSTEM"
+    ui_option_state "Base utilities" "$INSTALL_BASE_UTILS"
+    ui_option_state "User provisioning" "$CREATE_USER"
+    ui_option_state "Locales" "$CONFIGURE_LOCALES"
+    ui_option_state "Fish + Starship" "$INSTALL_FISH"
+    ui_option_state "SSH agent" "$CONFIGURE_SSH_AGENT"
+    ui_option_state "Go toolchain" "$INSTALL_GO"
+    ui_option_state "Node.js LTS via fnm" "$INSTALL_NODE"
+    ui_option_state "Docker CE" "$INSTALL_DOCKER"
+    ui_option_state "NVIDIA container toolkit" "$INSTALL_NVIDIA"
+    ui_option_state "CUDA toolkit" "$INSTALL_CUDA"
+    ui_option_state "Security auto-updates" "$ENABLE_AUTO_UPDATES"
+    ui_option_state "Performance tuning" "$PERFORMANCE_TUNING"
+    ui_option_state "systemd-journald limits" "$CONFIGURE_JOURNALD"
+}
+
+# Interactive menu
+show_menu() {
+    echo ""
+    section "Before You Start"
+    warn "Run these checks from Windows PowerShell before provisioning:"
+    info "wsl --update"
+    info "wsl --set-default-version 2"
+    info "Review %USERPROFILE%\\.wslconfig for RAM/CPU limits"
+
+    prompt_yn() {
+        local prompt="$1" default_yes="$2"
+        TUI_PROMPT_PREFIX="  ${SYMBOL_DOT} " tui_prompt_yn "$prompt" "$default_yes"
+    }
+
+    section "Configuration"
+    ui_hint "Press Enter to accept the highlighted default."
+
+    # System configuration
+    subsection "System"
+    prompt_yn "Configure WSL2 (wsl.conf with systemd)" true && CONFIGURE_WSL_CONF=true || CONFIGURE_WSL_CONF=false
+    prompt_yn "Update system packages" true && UPDATE_SYSTEM=true || UPDATE_SYSTEM=false
+    prompt_yn "Install base utilities (git, neovim, tmux, etc.)" true && INSTALL_BASE_UTILS=true || INSTALL_BASE_UTILS=false
+    prompt_yn "Create new user with sudo rights" false && CREATE_USER=true || CREATE_USER=false
+    prompt_yn "Configure locales (ru_RU, en_US)" true && CONFIGURE_LOCALES=true || CONFIGURE_LOCALES=false
+
+    # Shell and development
+    subsection "Shell and Development"
+    prompt_yn "Install Fish + Starship" true && INSTALL_FISH=true || INSTALL_FISH=false
+    prompt_yn "Configure ssh-agent" true && CONFIGURE_SSH_AGENT=true || CONFIGURE_SSH_AGENT=false
+    prompt_yn "Install Go (latest stable)" true && INSTALL_GO=true || INSTALL_GO=false
+    prompt_yn "Install Node.js (LTS via fnm)" true && INSTALL_NODE=true || INSTALL_NODE=false
+
+    # Containerization
+    subsection "Containers and GPU"
+    prompt_yn "Install Docker CE" true && INSTALL_DOCKER=true || INSTALL_DOCKER=false
+    if prompt_yn "Install NVIDIA Container Toolkit + CUDA support" false; then
+        INSTALL_NVIDIA=true
+        if prompt_yn "  → Install full CUDA Toolkit" true; then
+            INSTALL_CUDA=true
+        else
+            INSTALL_CUDA=false
+        fi
+    else
+        INSTALL_NVIDIA=false
+        INSTALL_CUDA=false
+    fi
+
+    # System optimization
+    subsection "Maintenance"
+    prompt_yn "Enable automatic security updates" true && ENABLE_AUTO_UPDATES=true || ENABLE_AUTO_UPDATES=false
+    prompt_yn "Apply performance tuning" true && PERFORMANCE_TUNING=true || PERFORMANCE_TUNING=false
+    prompt_yn "Configure systemd-journald limits (100MB disk + 50MB RAM)" true && CONFIGURE_JOURNALD=true || CONFIGURE_JOURNALD=false
+
+    echo ""
+    show_selected_options
+    echo ""
+    ui_success_title "${SYMBOL_ROCKET} Starting installation with selected options..."
+    echo ""
+    sleep 1
+}
+
+# Show menu
+show_menu
+
+################################################################################
+# 3. WSL2 Configuration
+################################################################################
+section "${SYMBOL_GEAR} WSL2 Configuration"
+
+if $CONFIGURE_WSL_CONF; then
+    progress "Creating optimized /etc/wsl.conf..."
+    
+    # Backup existing wsl.conf
+    if [ -f /etc/wsl.conf ]; then
+        cp /etc/wsl.conf "/etc/wsl.conf.backup.$(date +%F)" || true
+    fi
+
+    # Create optimized wsl.conf. Do not write an empty [user] default because
+    # WSL expects this key to contain a real Linux user name.
+    render_wsl_conf "" > /etc/wsl.conf
+
+    WSL_RESTART_REQUIRED=true
+    note_post_restart "Run 'wsl --shutdown' in Windows PowerShell so the new /etc/wsl.conf (including systemd) is applied."
+    log "WSL2 configuration updated"
+    info "After script completion, run 'wsl --shutdown' in Windows to apply changes"
+else
+    log "Skipping WSL2 configuration"
+fi
+
+################################################################################
+# 4. System Update and Base Packages
+################################################################################
+section "${SYMBOL_PACKAGE} System Update & Packages"
+
+if $UPDATE_SYSTEM; then
+    progress "Updating system packages..."
+    
+    # Enrich APT components
+    enrich_apt_components() {
+        local f="$1"; [ -f "$f" ] || return 0
+        sed -i -E '/^\s*deb\s/ { /non-free-firmware/! s/(^deb\s+[^#]*\bmain)(\s|$)/\1 contrib non-free non-free-firmware\2/ }' "$f"
+    }
+
+    enrich_deb822_components() {
+        local f="$1"; [ -f "$f" ] || return 0
+        sed -i -E '/^\s*Components:\s*/ {
+            /contrib/! s/$/ contrib/
+            /non-free([[:space:]]|$)/! s/$/ non-free/
+            /non-free-firmware/! s/$/ non-free-firmware/
+        }' "$f"
+    }
+    
+    enrich_apt_components "/etc/apt/sources.list"
+    for f in /etc/apt/sources.list.d/*.list; do 
+        [ -e "$f" ] && enrich_apt_components "$f"
+    done
+    for f in /etc/apt/sources.list.d/*.sources; do
+        [ -e "$f" ] && enrich_deb822_components "$f"
+    done
+    
+    # Update package lists once, then upgrade
+    apt_update_once
+    apt-get upgrade "${APT_INSTALL_OPTS[@]}" >/dev/null 2>&1
+    
+    log "System updated successfully"
+else
+    info "Skipping system update"
+fi
+
+if $INSTALL_BASE_UTILS; then
+    subsection "Base Development Utilities"
+    
+    # Optimized package list based on recommendations:
+    # - Removed: wget (duplicates curl), make/gcc/g++ (in build-essential)
+    # - Removed: iotop, sysstat, net-tools, xdg-user-dirs (not needed in WSL2)
+    # - Added: neovim, tmux, ncdu (recommended for development)
+    # - System info uses fastfetch -> neofetch -> skip fallback across Debian 12/13
+    base_packages=(
+        # Network & Downloads
+        "curl"                    # HTTP client (kept)
+        
+        # Version Control
+        "git"                     # Essential
+        
+        # Monitoring
+        "htop"                    # Process monitor
+        
+        # Build Tools
+        "build-essential"         # Includes: gcc, g++, make
+        "cmake"                   # Build system
+        
+        # Python
+        "python3"                 # Python interpreter
+        "python3-pip"             # Package manager
+        "python3-venv"            # Virtual environments
+        
+        # Modern Search Tools
+        "fzf"                     # Fuzzy finder
+        "ripgrep"                 # Fast grep (rg)
+        "fd-find"                 # Fast find (fd)
+        
+        # File Utilities
+        "tree"                    # Directory tree view
+        "jq"                      # JSON processor
+        "file"                    # File type detection
+        "ncdu"                    # Disk usage analyzer (NEW)
+        
+        # Archives
+        "unzip"                   # ZIP extraction
+        "zip"                     # ZIP creation
+        "xz-utils"                # XZ compression
+        
+        # Security
+        "gnupg"                   # GPG encryption
+        "ca-certificates"         # SSL certificates
+        
+        # System Info
+        "lsb-release"             # Distro info
+        "bc"                      # Calculator
+        
+        # Editors & Terminal (NEW)
+        "neovim"                  # Modern text editor
+        "tmux"                    # Terminal multiplexer (critical for WSL2!)
+    )
+
+    while IFS= read -r fetch_pkg; do
+        [ -n "$fetch_pkg" ] && base_packages+=("$fetch_pkg")
+    done < <(resolve_fetch_packages)
+    
+    progress "Installing ${#base_packages[@]} base packages..."
+    safe_install "${base_packages[@]}"
+
+    # Create symlinks for Debian naming conventions
+    if command -v batcat >/dev/null 2>&1 && ! command -v bat >/dev/null 2>&1; then
+        ln -sf "$(command -v batcat)" /usr/local/bin/bat 2>/dev/null || true
+    fi
+    
+    if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
+        ln -sf "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null || true
+    fi
+    
+    log "Base utilities configured"
+else
+    info "Skipping base utilities installation"
+fi
+
+################################################################################
+# 5. User Creation
+################################################################################
+section "${SYMBOL_GEAR} User Management"
+
+# Username validation function
+validate_username() {
+    local username="$1"
+    
+    # Empty username
+    [[ -z "$username" ]] && return 1
+    
+    # Only digits (not allowed by Linux)
+    [[ "$username" =~ ^[0-9]+$ ]] && return 2
+    
+    # Starts with digit or dash
+    [[ "$username" =~ ^[-0-9] ]] && return 3
+    
+    # Contains invalid characters (only lowercase, digits, underscore, dash allowed)
+    [[ ! "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && return 4
+    
+    # Too long (max 32)
+    [[ ${#username} -gt 32 ]] && return 5
+    
+    return 0
+}
+
+NEW_USER=""
+if $CREATE_USER; then
+    # Username input with validation and retry
+    while true; do
+        read -r -p "Enter new username: " NEW_USER
+        
+        validate_username "$NEW_USER"
+        validation_result=$?
+        
+        if [ $validation_result -eq 0 ]; then
+            break
+        else
+            case $validation_result in
+                1) warn "Username cannot be empty" ;;
+                2) warn "Username cannot be only numbers (causes UID confusion)" ;;
+                3) warn "Username cannot start with a number or dash" ;;
+                4) warn "Username can only contain: lowercase letters, numbers, underscore, dash" ;;
+                5) warn "Username is too long (max 32 characters)" ;;
+            esac
+            info "Please try again..."
+            echo ""
+        fi
+    done
+    
+    if id "$NEW_USER" &>/dev/null; then
+        warn "User $NEW_USER already exists. Skipping creation but will configure..."
+        # Offer to change password for existing user
+        read -p "Do you want to change password for existing user $NEW_USER? (y/N): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            # Loop until password is successfully set
+            while true; do
+                if passwd "$NEW_USER"; then
+                    log "Password changed for $NEW_USER"
+                    break
+                else
+                    warn "Failed to change password. Please try again."
+                    read -p "Retry? (Y/n): " -n 1 -r
+                    echo
+                    if [[ $REPLY =~ ^[Nn]$ ]]; then
+                        warn "Skipping password change."
+                        break
+                    fi
+                fi
+            done
+        fi
+
+        # Ensure user is in sudo group
+        if ! groups "$NEW_USER" | grep -q sudo; then
+            /usr/sbin/usermod -aG sudo "$NEW_USER"
+            log "Added $NEW_USER to sudo group"
+        fi
+    else
+        # Create user
+        /usr/sbin/adduser --gecos "" --disabled-password "$NEW_USER" || {
+            error "Failed to create user $NEW_USER"
+            CREATE_USER=false
+        }
+        if [ $CREATE_USER = true ]; then
+            USER_WAS_CREATED=true
+            /usr/sbin/usermod -aG sudo "$NEW_USER"
+            log "User $NEW_USER created and added to sudo group"
+
+            # Set password for new user
+            log "Setting password for new user $NEW_USER..."
+            while true; do
+                if passwd "$NEW_USER"; then
+                     break
+                else
+                     warn "Failed to set password. Please try again."
+                     read -p "Retry? (Y/n): " -n 1 -r
+                     echo
+                     if [[ $REPLY =~ ^[Nn]$ ]]; then
+                         warn "Skipping password setup (user might be locked)."
+                         break
+                     fi
+                fi
+            done
+        fi
+    fi
+
+        # Only configure if user was created/configured successfully
+        if [ $CREATE_USER = true ]; then
+            # Configure passwordless sudo
+            if common_safe_write_sudoers "/etc/sudoers.d/$NEW_USER" "$NEW_USER ALL=(ALL) NOPASSWD:ALL"; then
+                log "Passwordless sudo configured for $NEW_USER"
+            else
+                warn "Failed to configure passwordless sudo for $NEW_USER (visudo syntax check failed)"
+            fi
+
+            # Verify user home directory exists
+            USER_HOME=$(common_user_home "$NEW_USER" || echo "/home/$NEW_USER")
+            if [ ! -d "$USER_HOME" ]; then
+                warn "User home directory $USER_HOME does not exist, creating..."
+                mkdir -p "$USER_HOME"
+                chown -R "$NEW_USER:$NEW_USER" "$USER_HOME"
+                chmod 700 "$USER_HOME"
+            fi
+
+            # Update wsl.conf with default user
+            if $CONFIGURE_WSL_CONF; then
+                render_wsl_conf "$NEW_USER" > /etc/wsl.conf
+                log "Set $NEW_USER as default user in wsl.conf"
+                info "Default user will apply after WSL restart (wsl --shutdown)"
+            fi
+
+            # Store for later use
+            DOCKER_USER=$NEW_USER
+        fi
+else
+    # On a clean WSL distro, prefer the invoking sudo user. Otherwise fall back to
+    # the first regular human account (UID >= 1000). If none exists yet, keep root.
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        DOCKER_USER="$SUDO_USER"
+    else
+        DOCKER_USER="$(awk -F: '$3 >= 1000 && $1 != "nobody" {print $1; exit}' /etc/passwd)"
+        DOCKER_USER="${DOCKER_USER:-root}"
+    fi
+    log "Using existing user: $DOCKER_USER"
+fi
+
+# If the script lives in /home/<user>/..., return ownership to that Linux user.
+# This prevents the script from remaining owned by root/nobody after sudo execution.
+restore_linux_home_path_ownership "$SCRIPT_PATH"
+
+################################################################################
+# 6. Locale Configuration
+################################################################################
+section "${SYMBOL_GEAR} System Localization"
+
+if $CONFIGURE_LOCALES; then
+    log "Configuring system locales..."
+    
+    # Install locales package with availability check
+    safe_install locales
+    
+    # Check if dialog is available, fallback to read if not
+check_dialog() {
+    tui_has_visual_backend
+}
+
+# Locale selection
+    echo "Select system locale:"
+    echo "1) en_US.UTF-8 (English)"
+    echo "2) ru_RU.UTF-8 (Russian)"
+    echo "3) Both (en_US.UTF-8 + ru_RU.UTF-8)"
+    
+    if ! LOCALE_CHOICE=$(tui_radiolist "Locale Selection" "Select locale:" 15 60 3 "1" "English (en_US.UTF-8)" on "2" "Russian (ru_RU.UTF-8)" off "3" "Both (en_US.UTF-8 + ru_RU.UTF-8)" off); then
+        read -r -p "Enter choice [1-3]: " LOCALE_CHOICE
+    fi
+    
+    case $LOCALE_CHOICE in
+        1)
+            LOCALE_TO_GENERATE="en_US.UTF-8"
+            DEFAULT_LOCALE="en_US.UTF-8"
+            ;;
+        2)
+            LOCALE_TO_GENERATE="ru_RU.UTF-8"
+            DEFAULT_LOCALE="ru_RU.UTF-8"
+            ;;
+        3)
+            LOCALE_TO_GENERATE="en_US.UTF-8 ru_RU.UTF-8"
+            DEFAULT_LOCALE="en_US.UTF-8"
+            ;;
+        *)
+            warn "Invalid choice. Using English (en_US.UTF-8) as default"
+            LOCALE_TO_GENERATE="en_US.UTF-8"
+            DEFAULT_LOCALE="en_US.UTF-8"
+            ;;
+    esac
+    
+    # Generate locales
+    for locale in $LOCALE_TO_GENERATE; do
+        # Remove all existing entries for this locale (both commented and uncommented)
+        sed -i "/^#* *${locale} UTF-8/d" /etc/locale.gen
+        
+        # Add a single uncommented entry
+        echo "${locale} UTF-8" >> /etc/locale.gen
+    done
+
+    # Generate locales with C.UTF-8 to avoid LC_ALL=C conflicts
+    unset LC_ALL
+    unset LANG
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    /usr/sbin/locale-gen
+    unset LC_ALL
+    unset LANG
+
+    # Update locale configuration file
+    cat > /etc/default/locale <<EOF
+LANG=$DEFAULT_LOCALE
+LANGUAGE=${DEFAULT_LOCALE%%.*}
+LC_ALL=$DEFAULT_LOCALE
+EOF
+
+    # Write to profile for all users (will be sourced on login)
+    cat > /etc/profile.d/locale.sh <<EOF
+export LANG=$DEFAULT_LOCALE
+export LC_ALL=$DEFAULT_LOCALE
+export LANGUAGE=${DEFAULT_LOCALE%%.*}
+EOF
+
+    chmod +x /etc/profile.d/locale.sh
+
+    # DO NOT export locale in current session - it may not be fully ready
+    # Wait for restart for locale to be properly applied
+    log "Locale configured: $DEFAULT_LOCALE"
+    info "Locale will be fully applied after WSL restart"
+else
+    log "Skipping locale configuration"
+fi
+
+################################################################################
+# 7. Fish and Starship Installation
+################################################################################
+section "${SYMBOL_ROCKET} Fish + Starship Installation"
+
+if $INSTALL_FISH; then
+    log "Installing Fish shell and Starship prompt..."
+
+    # Install Fish with availability check
+    safe_install fish curl
+
+    # Install Starship
+    if ! command -v starship >/dev/null 2>&1; then
+        curl -sS https://starship.rs/install.sh | sh -s -- -y
+        log "Starship prompt installed"
+    fi
+
+    # Function to setup Fish for a user
+    setup_fish_for_user() {
+        local username=$1
+        local user_home
+        user_home=$(common_user_home "$username" || echo "/home/$username")
+
+        log "Setting up Fish + Starship for user: $username"
+
+        # Create config directories
+        install -d -m 0755 "$user_home/.config/fish"
+
+        # Generate starship preset nerd-font-symbols
+        if command -v starship >/dev/null 2>&1; then
+            starship preset nerd-font-symbols > "$user_home/.config/starship.toml" 2>/dev/null || true
+            chmod 644 "$user_home/.config/starship.toml" 2>/dev/null || true
+        fi
+
+        # Write ~/.config/fish/config.fish
+        cat > "$user_home/.config/fish/config.fish" <<'FISH_EOF'
+# ~/.config/fish/config.fish - WSL2 Optimized Configuration
+set -g fish_greeting ""
+
+# WSL2 Environment Variables
+set -gx EDITOR code
+set -gx VISUAL code
+set -gx BROWSER "/mnt/c/Windows/System32/cmd.exe /c start"
+set -gx DISPLAY ":0"
+
+# Paths
+if test -d /usr/local/go/bin
+    fish_add_path /usr/local/go/bin
+end
+if test -d $HOME/go/bin
+    fish_add_path $HOME/go/bin
+end
+if test -d /usr/local/cuda
+    set -gx CUDA_HOME /usr/local/cuda
+    fish_add_path /usr/local/cuda/bin
+    if test -d /usr/local/cuda/lib64
+        set -gx LD_LIBRARY_PATH /usr/local/cuda/lib64 $LD_LIBRARY_PATH
+    end
+end
+if test -d /usr/sbin
+    fish_add_path /usr/sbin
+end
+if test -d /mnt/c/Windows/System32
+    fish_add_path /mnt/c/Windows/System32
+end
+
+# Fast Node Manager (fnm) hook
+if test -d "$HOME/.local/share/fnm"
+    set -gx FNM_PATH "$HOME/.local/share/fnm"
+    fish_add_path -g "$FNM_PATH"
+end
+if command -v fnm >/dev/null 2>&1
+    fnm env --use-on-cd --shell fish | source
+end
+
+# System Aliases
+alias ll="ls -alFh"
+alias la="ls -A"
+alias l="ls -CF"
+alias cls="clear"
+alias c="clear"
+alias h="history"
+alias ..="cd .."
+alias ...="cd ../.."
+alias ....="cd ../../.."
+alias .....="cd ../../../.."
+
+# System Monitoring
+alias meminfo="free -h"
+alias cpuinfo="lscpu"
+alias diskinfo="df -h"
+alias ports="ss -tulpn"
+alias psa="ps aux"
+alias psg="ps aux | grep"
+
+# Package Management
+alias update="sudo apt update && sudo apt upgrade -y"
+alias install="sudo apt install"
+alias remove="sudo apt remove"
+alias search="apt search"
+alias autoremove="sudo apt autoremove -y"
+
+# Docker Aliases
+alias d="docker"
+alias dc="docker compose"
+alias dps="docker ps"
+alias dpsa="docker ps -a"
+alias di="docker images"
+alias dcu="docker compose up -d"
+alias dcd="docker compose down"
+alias dcl="docker compose logs -f"
+alias dex="docker exec -it"
+alias drm="docker rm"
+alias drmi="docker rmi"
+alias dprune="docker system prune -af"
+
+# Git Aliases
+alias g="git"
+alias gs="git status"
+alias gst="git status"
+alias ga="git add"
+alias gaa="git add --all"
+alias gc="git commit"
+alias gcm="git commit -m"
+alias gca="git commit -a"
+alias gcam="git commit -am"
+alias gp="git pull"
+alias gP="git push"
+alias gpo="git push origin"
+alias gl="git log --oneline --graph --decorate"
+alias gd="git diff"
+alias gb="git branch"
+alias gco="git checkout"
+alias gcb="git checkout -b"
+
+# WSL2 Helper Functions
+function explorer
+    if test (count $argv) -gt 0
+        explorer.exe (wslpath -w "$argv[1]")
+    else
+        explorer.exe (wslpath -w ".")
+    end
+end
+
+function cmd
+    cmd.exe /c "$argv"
+end
+
+function powershell
+    powershell.exe -Command "$argv"
+end
+
+function wslperf
+    echo "=== WSL Performance ==="
+    echo "Memory: "(free -h | grep '^Mem:' | awk '{print $3"/"$2}')
+    echo "CPU: "(top -bn1 | grep 'Cpu(s):' | awk '{print $2}' | cut -d'%' -f1)"%"
+    echo "Disk: "(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')
+end
+
+function mkcd
+    mkdir -p "$argv[1]"; and cd "$argv[1]"
+end
+
+# Interactive starship prompt
+if status is-interactive
+    if command -v starship >/dev/null 2>&1
+        starship init fish | source
+    end
+end
+FISH_EOF
+        chmod 644 "$user_home/.config/fish/config.fish"
+
+        # Configure hybrid auto-switch in ~/.bashrc
+        local bashrc="$user_home/.bashrc"
+        touch "$bashrc"
+        if ! grep -q "exec fish" "$bashrc"; then
+            cat >> "$bashrc" <<'BASH_FISH_EOF'
+
+# Auto-switch to Fish for interactive sessions only
+# Non-interactive SSH commands, cron, scp/rsync stay in standard Bash
+if [[ $- == *i* ]] && [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && command -v fish >/dev/null 2>&1; then
+    exec fish
+fi
+BASH_FISH_EOF
+        fi
+
+        chown -R "$username:$username" "$user_home/.config" "$bashrc" 2>/dev/null || true
+    }
+
+    # Ensure fish is available before setup
+    if ! command -v fish >/dev/null 2>&1; then
+        error "Fish installation failed - fish binary not found!"
+        exit 1
+    fi
+
+    # Setup Fish for root
+    setup_fish_for_user root
+
+    # Setup Fish for new user if created
+    if [ -n "$NEW_USER" ]; then
+        setup_fish_for_user "$NEW_USER"
+    fi
+
+    # Setup Fish for docker user
+    if [ -n "$DOCKER_USER" ] && [ "$DOCKER_USER" != "root" ] && [ "$DOCKER_USER" != "$NEW_USER" ]; then
+        setup_fish_for_user "$DOCKER_USER"
+    fi
+
+    log "Fish + Starship configuration completed"
+else
+    log "Skipping Fish installation"
+fi
+
+################################################################################
+# 7.5. Bash Modernization (Minimal Configuration)
+################################################################################
+section "${SYMBOL_GEAR} Bash Modernization"
+
+log "Configuring modern Bash setup..."
+
+# Ensure bash-completion is installed
+safe_install bash-completion
+
+# Function to setup modern Bash for a user
+setup_bash_for_user() {
+    local username=$1
+    local user_home
+    user_home=$(common_user_home "$username" || echo "/home/$username")
+    
+    log "Setting up modern Bash configuration for user: $username"
+    
+    # Backup existing .bashrc if it exists and is not our version
+    if [ -f "$user_home/.bashrc" ] && ! grep -q "WSL2 Optimized Bash Configuration" "$user_home/.bashrc"; then
+        cp "$user_home/.bashrc" "$user_home/.bashrc.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
+        log "Backed up existing .bashrc for $username"
+    fi
+    
+    # Create modern .bashrc with WSL2 optimizations
+    cat > "$user_home/.bashrc" <<'BASHRC'
+# WSL2 Optimized Bash Configuration
+
+# Auto-switch to Fish for interactive sessions only
+# Non-interactive SSH commands, cron, scp/rsync stay in standard Bash
+if [[ $- == *i* ]] && [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && command -v fish >/dev/null 2>&1; then
+    exec fish
+fi
+
+# ============================================
+# Shell Options
+# ============================================
+
+# History configuration
+HISTSIZE=50000
+HISTFILESIZE=100000
+HISTCONTROL=ignoreboth:erasedups
+HISTTIMEFORMAT="%F %T "
+shopt -s histappend
+
+# Navigation and behavior
+shopt -s autocd           # cd to directory just by typing its name
+shopt -s cdspell          # autocorrect typos in path names when using cd
+shopt -s dirspell         # autocorrect typos in directory names during completion
+shopt -s globstar         # ** recursive glob
+shopt -s checkwinsize     # update LINES and COLUMNS after each command
+shopt -s nocaseglob       # case-insensitive globbing
+
+# Completion options
+shopt -s no_empty_cmd_completion
+
+# ============================================
+# Bash Completion
+# ============================================
+
+if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+# ============================================
+# Environment Variables
+# ============================================
+
+# WSL2-specific environment variables
+export EDITOR='code'
+export VISUAL='code'
+export BROWSER="/mnt/c/Windows/System32/cmd.exe /c start"
+export DISPLAY=":0"
+
+# Path optimization for WSL
+export PATH="/usr/local/bin:/usr/bin:$PATH"
+
+# ============================================
+# Prompt Configuration
+# ============================================
+
+# Colors for prompt
+if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+    # We have color support
+    PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='\u@\h:\w\$ '
+fi
+
+# If Starship is installed, use it
+if command -v starship >/dev/null 2>&1; then
+    eval "$(starship init bash)"
+fi
+
+# ============================================
+# Docker Aliases
+# ============================================
+
+alias d='docker'
+alias dc='docker compose'
+alias dps='docker ps'
+alias dpsa='docker ps -a'
+alias di='docker images'
+alias dcu='docker compose up -d'
+alias dcd='docker compose down'
+alias dcl='docker compose logs -f'
+alias dex='docker exec -it'
+alias drm='docker rm'
+alias drmi='docker rmi'
+alias dprune='docker system prune -af'
+
+# ============================================
+# Git Aliases
+# ============================================
+
+alias g='git'
+alias gs='git status'
+alias gst='git status'
+alias ga='git add'
+alias gaa='git add --all'
+alias gc='git commit'
+alias gcm='git commit -m'
+alias gca='git commit -a'
+alias gcam='git commit -am'
+alias gp='git pull'
+alias gP='git push'
+alias gpo='git push origin'
+alias gl='git log --oneline --graph --decorate'
+alias gd='git diff'
+alias gb='git branch'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+
+# ============================================
+# System Aliases
+# ============================================
+
+alias ll='ls -alFh'
+alias la='ls -A'
+alias l='ls -CF'
+alias cls='clear'
+alias c='clear'
+alias h='history'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias .....='cd ../../../..'
+
+# System monitoring
+alias meminfo='free -h'
+alias cpuinfo='lscpu'
+alias diskinfo='df -h'
+alias ports='netstat -tulanp'
+alias psa='ps aux'
+alias psg='ps aux | grep'
+
+# Package management
+alias update='sudo apt update && sudo apt upgrade -y'
+alias install='sudo apt install'
+alias remove='sudo apt remove'
+alias search='apt search'
+alias autoremove='sudo apt autoremove -y'
+
+# Safety aliases
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+alias mkdir='mkdir -pv'
+
+# ============================================
+# WSL2-specific Functions
+# ============================================
+
+explorer() {
+    if [ -z "$1" ]; then
+        explorer.exe .
+    else
+        explorer.exe "$(wslpath -w "$1")"
+    fi
+}
+
+cmd() {
+    cmd.exe /c "$*"
+}
+
+powershell() {
+    powershell.exe -Command "$*"
+}
+
+wslperf() {
+    echo "=== WSL Performance ==="
+    echo "Memory: $(free -h | grep '^Mem:' | awk '{print $3"/"$2}')"
+    echo "CPU: $(top -bn1 | grep 'Cpu(s):' | awk '{print $2}' | cut -d'%' -f1)%"
+    echo "Disk: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
+}
+
+# ============================================
+# Useful Functions
+# ============================================
+
+mkcd() {
+    mkdir -p "$1" && cd "$1"
+}
+
+extract() {
+    if [ -f "$1" ]; then
+        case "$1" in
+            *.tar.bz2)   tar xjf "$1"     ;;
+            *.tar.gz)    tar xzf "$1"     ;;
+            *.bz2)       bunzip2 "$1"     ;;
+            *.rar)       unrar e "$1"     ;;
+            *.gz)        gunzip "$1"      ;;
+            *.tar)       tar xf "$1"      ;;
+            *.tbz2)      tar xjf "$1"     ;;
+            *.tgz)       tar xzf "$1"     ;;
+            *.zip)       unzip "$1"       ;;
+            *.Z)         uncompress "$1"  ;;
+            *.7z)        7z x "$1"        ;;
+            *)           echo "'$1' cannot be extracted via extract()" ;;
+        esac
+    else
+        echo "'$1' is not a valid file"
+    fi
+}
+
+# ============================================
+# fnm (Fast Node Manager)
+# ============================================
+
+export FNM_PATH="$HOME/.local/share/fnm"
+export PATH="$FNM_PATH:$PATH"
+export XDG_RUNTIME_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/fnm-runtime"
+mkdir -p "$XDG_RUNTIME_DIR"
+if command -v fnm >/dev/null 2>&1; then
+    eval "$(fnm env --use-on-cd --shell bash)"
+fi
+
+# ============================================
+# Additional Settings
+# ============================================
+
+# Enable color support for ls and grep
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# Improved less
+export LESS='-R -F -X'
+export LESSOPEN='| /usr/bin/lesspipe %s 2>&-'
+
+# ============================================
+# Welcome Message (optional)
+# ============================================
+
+# Uncomment to show system info on login
+# if [ -t 0 ]; then
+#     echo "Welcome to WSL2 - $(lsb_release -d | cut -f2)"
+#     echo "$(uname -r)"
+# fi
+BASHRC
+
+    # Set proper ownership
+    if [ "$username" != "root" ]; then
+        chown "$username":"$username" "$user_home/.bashrc" 2>/dev/null || true
+    fi
+    
+    log "✓ Modern Bash configuration created for $username"
+}
+
+# Setup Bash for root
+setup_bash_for_user root
+
+# Setup Bash for new user if created
+if [ -n "$NEW_USER" ]; then
+    setup_bash_for_user "$NEW_USER"
+fi
+
+# Setup Bash for docker user if different
+if [ -n "$DOCKER_USER" ] && [ "$DOCKER_USER" != "root" ] && [ "$DOCKER_USER" != "$NEW_USER" ]; then
+    setup_bash_for_user "$DOCKER_USER"
+fi
+
+log "✓ Bash modernization completed"
+log "  Features: history (50k lines), smart navigation, bash-completion"
+log "  Aliases: Docker, Git, System"
+log "  Functions: WSL2 integration, utilities, fnm auto-switching"
+if command -v starship >/dev/null 2>&1; then
+    log "  Prompt: Starship (same as Fish)"
+fi
+
+################################################################################
+# 8. Go Installation (Latest Version)
+################################################################################
+if $INSTALL_GO; then
+section "${SYMBOL_PACKAGE} Go Installation"
+
+log "Installing Go (latest stable version)..."
+
+# Install Go using curl and SHA256 verification
+install_go() {
+    local go_version
+    local go_arch
+    local go_os="linux"
+    local go_download_url
+    local go_checksum_url
+    local go_expected_checksum
+    local temp_dir
+    local previous_pwd
+
+    cleanup_go_temp_dir() {
+        if [ -n "${temp_dir:-}" ] && [ -d "${temp_dir:-}" ]; then
+            rm -rf "$temp_dir"
+        fi
+    }
+
+    # Detect architecture
+    go_arch=$(uname -m)
+    case $go_arch in
+        x86_64)
+            go_arch="amd64"
+            ;;
+        aarch64)
+            go_arch="arm64"
+            ;;
+        *)
+            warn "Unsupported architecture: $go_arch"
+            return 1
+            ;;
+    esac
+
+    log "Detected architecture: $go_arch"
+
+    # Get latest Go version
+    log "Fetching latest Go version..."
+    go_version=$(curl -s https://go.dev/VERSION?m=text | head -1 | sed 's/go//')
+
+    if [ -z "$go_version" ]; then
+        go_version="1.25.4"  # fallback version
+        warn "Could not determine latest Go version, using fallback: $go_version"
+    fi
+
+    log "Latest Go version: $go_version"
+
+    # Build download URL
+    # Use dl.google.com for direct downloads (go.dev redirects and causes issues)
+    go_download_url="https://dl.google.com/go/go${go_version}.${go_os}-${go_arch}.tar.gz"
+    go_checksum_url="https://dl.google.com/go/go${go_version}.${go_os}-${go_arch}.tar.gz.sha256"
+
+    # Create temporary directory
+    temp_dir=$(mktemp -d)
+    previous_pwd=$(pwd)
+
+    # Download checksum
+    log "Downloading Go checksum..."
+    if ! curl -fsSL "$go_checksum_url" -o "$temp_dir/checksum.txt"; then
+        warn "Failed to download Go checksum"
+        cleanup_go_temp_dir
+        return 1
+    fi
+
+    go_expected_checksum=$(cut -d' ' -f1 "$temp_dir/checksum.txt")
+    log "Expected checksum: $go_expected_checksum"
+
+    # Download Go
+    log "Downloading Go ${go_version} for ${go_arch}..."
+    if ! curl -fsSL "$go_download_url" -o "$temp_dir/go.tar.gz"; then
+        warn "Failed to download Go"
+        cleanup_go_temp_dir
+        return 1
+    fi
+
+    # Verify checksum
+    log "Verifying Go checksum..."
+    cd "$temp_dir"
+    if ! echo "$go_expected_checksum  go.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+        warn "Go checksum verification failed"
+        cd "$previous_pwd" >/dev/null 2>&1 || true
+        cleanup_go_temp_dir
+        return 1
+    fi
+    cd "$previous_pwd" >/dev/null 2>&1 || true
+
+    log "Checksum verified successfully"
+
+    # Remove old Go if exists
+    if [ -d "/usr/local/go" ]; then
+        log "Removing old Go installation..."
+        rm -rf /usr/local/go
+    fi
+
+    # Extract and install Go
+    log "Installing Go to /usr/local/go..."
+    tar -C /usr/local -xzf "$temp_dir/go.tar.gz"
+
+    # Add Go to PATH for all users via profile.d
+    cat > /etc/profile.d/golang.sh <<'GOEOF'
+export PATH=/usr/local/go/bin:$PATH
+export GOPATH=$HOME/go
+export PATH=$GOPATH/bin:$PATH
+GOEOF
+    chmod +x /etc/profile.d/golang.sh
+
+    # Also add to Bash configs if they exist
+    add_go_to_bashrc() {
+        local bashrc_path=$1
+        if [ -f "$bashrc_path" ]; then
+            if ! grep -q "golang" "$bashrc_path"; then
+                cat >> "$bashrc_path" <<'BASHEOF'
+
+# Go environment (install-go-latest)
+export PATH=/usr/local/go/bin:$PATH
+export GOPATH=$HOME/go
+export PATH=$GOPATH/bin:$PATH
+BASHEOF
+                log "Added Go configuration to $bashrc_path"
+            fi
+        fi
+    }
+
+    # Add to root's .bashrc
+    add_go_to_bashrc "/root/.bashrc"
+
+    # Add to regular user's .bashrc if exists
+    if [ -n "$NEW_USER" ] && $CREATE_USER; then
+        user_home=$(common_user_home "$NEW_USER" || echo "/home/$NEW_USER")
+        add_go_to_bashrc "$user_home/.bashrc"
+    fi
+
+    # Source it for current session
+    export PATH=/usr/local/go/bin:$PATH
+    export GOPATH=$HOME/go
+    export PATH=$GOPATH/bin:$PATH
+
+    cleanup_go_temp_dir
+    log "Go ${go_version} installed successfully"
+    /usr/local/go/bin/go version
+}
+
+install_go || warn "Go installation failed, continuing..."
+else
+    log "Skipping Go installation"
+fi
+
+################################################################################
+# 9. Node.js Installation with fnm
+################################################################################
+if $INSTALL_NODE; then
+section "${SYMBOL_PACKAGE} Node.js Installation (fnm + LTS)"
+
+log "Installing fnm and Node.js LTS..."
+# Clean-OS target: do not carry legacy Node manager migration/removal logic here.
+
+ensure_fnm_install_dependencies() {
+    local required_packages=(curl unzip)
+    local missing_packages=()
+    local unresolved_packages=()
+    local pkg
+
+    for pkg in "${required_packages[@]}"; do
+        command -v "$pkg" >/dev/null 2>&1 || missing_packages+=("$pkg")
+    done
+
+    if [ ${#missing_packages[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    warn "Missing fnm prerequisites: ${missing_packages[*]}. Attempting to install them..."
+    safe_install "${missing_packages[@]}"
+
+    for pkg in "${missing_packages[@]}"; do
+        command -v "$pkg" >/dev/null 2>&1 || unresolved_packages+=("$pkg")
+    done
+
+    if [ ${#unresolved_packages[@]} -eq 0 ]; then
+        log "fnm prerequisites installed successfully"
+        return 0
+    fi
+
+    warn "Skipping fnm/Node.js installation because required packages are still missing: ${unresolved_packages[*]}"
+    return 1
+}
+
+# Function to install fnm for a user
+install_fnm_for_user() {
+    local username=$1
+    local user_home
+    user_home=$(common_user_home "$username" || echo "/home/$username")
+
+    log "Installing fnm for user: $username"
+
+    local fnm_install_script="/tmp/fnm_install_${username}.sh"
+
+    cat > "$fnm_install_script" <<'FNMINSTALL'
+#!/bin/bash
+set -e
+
+export HOME="$1"
+export USER="$2"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+export XDG_RUNTIME_DIR="$XDG_STATE_HOME/fnm-runtime"
+
+# fnm installer requires curl + unzip
+command -v curl >/dev/null 2>&1 || { echo "curl is required"; exit 1; }
+command -v unzip >/dev/null 2>&1 || { echo "unzip is required"; exit 1; }
+
+# Install fnm without modifying shell rc files
+curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
+
+# Make fnm available in this non-interactive shell
+export PATH="$XDG_DATA_HOME/fnm:$PATH"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+if ! command -v fnm >/dev/null 2>&1; then
+    echo "fnm binary not found in PATH after install"
+    exit 1
+fi
+
+# Load fnm environment in the current shell
+# Use bash here because this installer itself runs via bash
+
+eval "$(fnm env --shell bash)"
+
+# Install latest LTS, activate it, and make it default
+fnm install --lts --use
+CURRENT_NODE="$(fnm current)"
+fnm default "$CURRENT_NODE"
+
+# Enable Corepack for pnpm/yarn where available
+if command -v corepack >/dev/null 2>&1; then
+    corepack enable || true
+fi
+
+# Output versions for verification
+node --version
+npm --version
+FNMINSTALL
+
+    chmod +x "$fnm_install_script"
+
+    if [ "$username" = "root" ]; then
+        bash "$fnm_install_script" "$user_home" "$username"
+    else
+        su - "$username" -c "bash '$fnm_install_script' '$user_home' '$username'"
+    fi
+
+    local fnm_bin="$user_home/.local/share/fnm/fnm"
+    if [ -x "$fnm_bin" ]; then
+        log "fnm installed successfully for $username"
+    else
+        warn "fnm installation may have failed for $username"
+    fi
+
+    chown -R "$username:$username" "$user_home/.local/share/fnm" 2>/dev/null || true
+    chown -R "$username:$username" "$user_home/.local/state/fnm-runtime" 2>/dev/null || true
+    chown -R "$username:$username" "$user_home/.npm" 2>/dev/null || true
+    chown "$username:$username" "$user_home/.bashrc" 2>/dev/null || true
+
+    rm -f "$fnm_install_script"
+
+    log "fnm setup completed for $username"
+}
+
+if ensure_fnm_install_dependencies; then
+    # Install fnm for root
+    install_fnm_for_user "root" || warn "fnm installation for root failed"
+
+    # Install fnm for regular user if created
+    if [ -n "${NEW_USER:-}" ] && $CREATE_USER; then
+        install_fnm_for_user "$NEW_USER" || warn "fnm installation for $NEW_USER failed"
+    fi
+
+    # Install fnm for the active non-root user when different from the users above
+    if [ -n "${DOCKER_USER:-}" ] && [ "$DOCKER_USER" != "root" ] && [ "$DOCKER_USER" != "${NEW_USER:-}" ]; then
+        install_fnm_for_user "$DOCKER_USER" || warn "fnm installation for $DOCKER_USER failed"
+    fi
+
+    log "Node.js and fnm installation completed"
+fi
+else
+    log "Skipping Node.js/fnm installation"
+fi
+
+################################################################################
+# 10. SSH Agent Configuration
+################################################################################
+section "${SYMBOL_GEAR} SSH Agent Configuration"
+
+if $CONFIGURE_SSH_AGENT; then
+    log "Configuring SSH agent for WSL2..."
+    
+    # Install openssh-client with availability check
+    safe_install openssh-client
+    
+    if has_user_systemd; then
+        log "Enabling ssh-agent.socket via systemd..."
+        systemctl --user enable --now ssh-agent.socket || warn "Failed to enable ssh-agent.socket"
+    else
+        log "Configuring ssh-agent via profile..."
+        
+        # write literal $USER for runtime expansion in user shell
+        # shellcheck disable=SC2016
+        PROFILE_SNIPPET='# WSL2: автозапуск ssh-agent (без systemd)
+if ! pgrep -u "$USER" ssh-agent >/dev/null 2>&1; then
+  eval "$(ssh-agent -s)" >/dev/null
+fi
+'
+        
+        for f in "/home/$DOCKER_USER/.bash_profile" "/home/$DOCKER_USER/.profile" "/home/$DOCKER_USER/.zprofile"; do
+            [ -f "$f" ] || touch "$f"
+            if ! grep -F "WSL2: автозапуск ssh-agent" "$f" >/dev/null 2>&1; then
+                printf "%b\n" "$PROFILE_SNIPPET" >>"$f"
+                log "Added ssh-agent autostart to ${f##*/}"
+            fi
+        done
+    fi
+    
+    log "SSH agent configuration completed"
+else
+    log "Skipping SSH agent configuration"
+fi
+
+################################################################################
+# 11. Docker Installation
+################################################################################
+section "${SYMBOL_PACKAGE} Docker Installation"
+
+if $INSTALL_DOCKER; then
+    log "Installing Docker Engine from the official Docker APT repository..."
+
+    # Remove old/conflicting Docker packages per official docs
+    apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true
+
+    safe_install ca-certificates curl gnupg
+
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    DOCKER_ARCH="$(dpkg --print-architecture)"
+
+    common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "/etc/apt/keyrings/docker.asc" > /etc/apt/sources.list.d/docker.sources
+
+    APT_UPDATED=0
+    apt_update_once
+
+    docker_packages=(
+        "docker-ce"
+        "docker-ce-cli"
+        "containerd.io"
+        "docker-buildx-plugin"
+        "docker-compose-plugin"
+    )
+    safe_install "${docker_packages[@]}"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        error "Docker installation failed - docker binary not found"
+        exit 1
+    fi
+
+    mkdir -p /etc/docker
+    cat > /etc/docker/daemon.json <<'EOF'
+{
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "features": {
+    "buildkit": true
+  }
+}
+EOF
+
+    if service_actions_available; then
+        systemctl enable --now docker || {
+            error "Failed to enable/start docker.service"
+            exit 1
+        }
+        log "Docker service enabled and started"
+    else
+        note_post_restart "After restarting WSL, start Docker with 'sudo systemctl enable --now docker' if it is not already running."
+        warn "systemd is not active in the current session yet. Docker will be started after WSL restarts with systemd enabled."
+    fi
+
+    groupadd -f docker
+    if [ -n "$DOCKER_USER" ] && [ "$DOCKER_USER" != "root" ]; then
+        usermod -aG docker "$DOCKER_USER"
+        log "User $DOCKER_USER added to docker group"
+    fi
+
+    DOCKER_VERSION=$(docker --version 2>/dev/null || echo "Not available")
+    COMPOSE_VERSION=$(docker compose version 2>/dev/null || echo "Not available")
+    log "Docker installed: $DOCKER_VERSION"
+    log "Docker Compose: $COMPOSE_VERSION"
+else
+    log "Skipping Docker installation"
+fi
+
+################################################################################
+# 12. NVIDIA Container Toolkit and CUDA
+################################################################################
+section "${SYMBOL_GEAR} NVIDIA Support Installation"
+
+if $INSTALL_NVIDIA; then
+    log "Installing NVIDIA Container Toolkit..."
+    
+    # Check GPU status
+    gpu_status_wsl() {
+        local ok_flag=0
+        echo "Checking GPU/WSL status:"
+        if [ -e /dev/dxg ]; then
+            echo " - /dev/dxg: OK (WSL GPU available)"
+        else
+            echo " - /dev/dxg: Missing (GPU not available in WSL)"
+            ok_flag=1
+        fi
+        if command -v nvidia-smi >/dev/null 2>&1; then
+            echo " - nvidia-smi: found"
+            nvidia-smi -L || true
+        else
+            echo " - nvidia-smi: not found in Linux environment"
+            ok_flag=1
+        fi
+        
+        if [ $ok_flag -ne 0 ]; then
+            warn "GPU may not be available. Installation will continue but may not work properly."
+            warn "Tips:"
+            warn " - Install latest NVIDIA driver with WSL support"
+            warn " - Enable GPU support for your WSL distribution"
+            warn " - Run 'wsl --shutdown' after driver update"
+        fi
+        return $ok_flag
+    }
+    
+    gpu_status_wsl || true
+    
+    # Install NVIDIA Container Toolkit
+    install -m 0755 -d /usr/share/keyrings
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+        gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    
+    ARCH="$(dpkg --print-architecture)"
+    echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/${ARCH}/ /" | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    APT_UPDATED=0
+    if apt_update_once; then
+        safe_install nvidia-container-toolkit
+    else
+        warn "Failed to refresh APT after adding the NVIDIA Container Toolkit repository"
+        warn "Skipping NVIDIA Container Toolkit package installation until APT is healthy"
+    fi
+
+    # Configure NVIDIA runtime - only if Docker is installed
+    if command -v nvidia-ctk >/dev/null 2>&1; then
+        if command -v docker >/dev/null 2>&1; then
+            # Ensure Docker directory exists
+            mkdir -p /etc/docker
+
+            # Stop Docker before configuration if running
+            if service_actions_available; then
+                systemctl stop docker 2>/dev/null || true
+                sleep 2
+            fi
+
+            # Ensure Docker daemon.json is valid JSON (nvidia-ctk needs valid JSON to modify)
+            if [ ! -f /etc/docker/daemon.json ]; then
+                log "Creating empty Docker daemon.json..."
+                echo '{}' > /etc/docker/daemon.json
+            fi
+
+            # Validate daemon.json before modifying
+            if ! grep -q '{' /etc/docker/daemon.json 2>/dev/null; then
+                log "Repairing invalid daemon.json..."
+                echo '{}' > /etc/docker/daemon.json
+            fi
+
+            # Configure NVIDIA runtime using nvidia-ctk (idempotent, safe to run multiple times)
+            log "Configuring NVIDIA Container Runtime..."
+            nvidia-ctk runtime configure --runtime=docker 2>&1 | tee -a "$LOG_FILE" | grep -v "^INFO" || {
+                warn "nvidia-ctk configuration completed with status: $?"
+            }
+
+            # Reload and restart Docker
+            if service_actions_available; then
+                log "Reloading systemd daemon..."
+                systemctl daemon-reload 2>/dev/null || true
+                sleep 1
+
+                log "Starting Docker service..."
+                systemctl start docker 2>/dev/null || true
+                sleep 2
+
+                # Check Docker status with retries
+                retry_count=0
+                max_retries=3
+                while [ $retry_count -lt $max_retries ]; do
+                    if systemctl is-active docker >/dev/null 2>&1; then
+                        log "NVIDIA Container Toolkit configured successfully"
+                        break
+                    fi
+                    retry_count=$((retry_count + 1))
+                    if [ $retry_count -lt $max_retries ]; then
+                        warn "Docker not ready yet, waiting... ($retry_count/$max_retries)"
+                        sleep 2
+                    fi
+                done
+
+                if [ $retry_count -eq $max_retries ]; then
+                    warn "Docker service may not be running - this is not critical for NVIDIA toolkit"
+                    info "You can manually restart Docker with: sudo systemctl restart docker"
+                fi
+            else
+                note_post_restart "If you enabled NVIDIA Container Toolkit, restart WSL first, then run 'sudo systemctl restart docker' before testing GPU containers."
+                warn "systemd not available in the current session - Docker restart deferred until after WSL restart"
+            fi
+        else
+            warn "Docker not installed - skipping NVIDIA runtime configuration"
+            warn "Install Docker first, then run: sudo nvidia-ctk runtime configure --runtime=docker"
+        fi
+    else
+        warn "nvidia-ctk not found - installation may have failed"
+    fi
+    
+    # Install CUDA Toolkit if requested
+    if $INSTALL_CUDA; then
+        log "Installing CUDA Toolkit..."
+
+        # Add CUDA repository (Official NVIDIA method for Debian 12/13)
+        log "Configuring CUDA repository for Debian ${VERSION_ID} (${VERSION_CODENAME})..."
+
+        CUDA_DISTRO=$(resolve_cuda_distro "$VERSION_ID") || {
+            error "Unsupported CUDA Debian release: ${VERSION_ID:-unknown}"
+            exit 1
+        }
+        CUDA_ARCH="x86_64"  # NVIDIA uses x86_64 in repository paths, not amd64!
+        CUDA_REPO_PATH="${CUDA_DISTRO}/x86_64"
+
+        log "CUDA repository: $CUDA_DISTRO/$CUDA_ARCH"
+
+        # Enable contrib repository (required for Debian)
+        log "Enabling contrib repository (required for Debian)..."
+        if ! grep -qE "^deb .* contrib|^\s*Components:.*\bcontrib\b" /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null; then
+            if command -v add-apt-repository >/dev/null 2>&1; then
+                add-apt-repository contrib -y 2>&1 | tee -a "$LOG_FILE" || {
+                    warn "add-apt-repository failed, trying alternative method..."
+                    sed -i 's/ main$/ main contrib/' /etc/apt/sources.list 2>/dev/null || true
+                    sed -i 's/ main / main contrib /' /etc/apt/sources.list 2>/dev/null || true
+                    for f in /etc/apt/sources.list.d/*.sources; do
+                        [ -e "$f" ] && sed -i -E '/^\s*Components:\s*/ { /contrib/! s/$/ contrib/ }' "$f"
+                    done
+                }
+            else
+                sed -i 's/ main$/ main contrib/' /etc/apt/sources.list 2>/dev/null || true
+                sed -i 's/ main / main contrib /' /etc/apt/sources.list 2>/dev/null || true
+                for f in /etc/apt/sources.list.d/*.sources; do
+                    [ -e "$f" ] && sed -i -E '/^\s*Components:\s*/ { /contrib/! s/$/ contrib/ }' "$f"
+                done
+            fi
+            log "✓ contrib repository enabled"
+        else
+            log "✓ contrib repository already enabled"
+        fi
+
+        # Install cuda-keyring package (official method with robust error handling)
+        CUDA_KEYRING_DEB="cuda-keyring_1.1-1_all.deb"
+        CUDA_KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/${CUDA_ARCH}/${CUDA_KEYRING_DEB}"
+        CUDA_KEYRING_PATH="/tmp/${CUDA_KEYRING_DEB}"
+
+        log "Downloading CUDA keyring package..."
+        log "URL: $CUDA_KEYRING_URL"
+
+        # Clean up any existing file
+        rm -f "$CUDA_KEYRING_PATH"
+
+        # Download with retry logic
+        download_success=false
+        for attempt in 1 2 3; do
+            log "Download attempt $attempt/3..."
+            if wget --timeout=30 --tries=3 -q --show-progress "$CUDA_KEYRING_URL" -O "$CUDA_KEYRING_PATH" 2>&1 | tee -a "$LOG_FILE"; then
+                # Verify file was downloaded and is not empty
+                if [[ -f "$CUDA_KEYRING_PATH" ]] && [[ -s "$CUDA_KEYRING_PATH" ]]; then
+                    file_size=$(stat -c%s "$CUDA_KEYRING_PATH" 2>/dev/null)
+                    log "Downloaded file size: ${file_size} bytes"
+
+                    # Check if file is a valid deb package (should be at least 1KB)
+                    if [[ $file_size -gt 1024 ]]; then
+                        # Verify it's actually a .deb file
+                        if dpkg --info "$CUDA_KEYRING_PATH" >/dev/null 2>&1; then
+                            log "✓ File downloaded successfully and verified"
+                            download_success=true
+                            break
+                        else
+                            warn "Downloaded file is not a valid Debian package"
+                            warn "File content check: $(head -c 100 "$CUDA_KEYRING_PATH" 2>/dev/null | od -A x -t x1z -v | head -2)"
+                            rm -f "$CUDA_KEYRING_PATH"
+                        fi
+                    else
+                        warn "Downloaded file is too small (${file_size} bytes)"
+                        rm -f "$CUDA_KEYRING_PATH"
+                    fi
+                else
+                    warn "Downloaded file is missing or empty"
+                fi
+            else
+                warn "wget failed with exit code $?"
+            fi
+
+            if [[ $attempt -lt 3 ]]; then
+                warn "Retrying in 3 seconds..."
+                sleep 3
+            fi
+        done
+
+        if [[ "$download_success" == "true" ]]; then
+            log "Installing CUDA keyring package..."
+            if dpkg -i "$CUDA_KEYRING_PATH" 2>&1 | tee -a "$LOG_FILE"; then
+                log "✓ CUDA keyring installed successfully"
+                rm -f "$CUDA_KEYRING_PATH"
+
+                log "Updating APT repository cache..."
+                APT_UPDATED=0
+                if apt_update_once; then
+                    log "✓ APT cache updated successfully"
+                else
+                    warn "Failed to update package list after adding CUDA repository"
+                    INSTALL_CUDA=false
+                fi
+            else
+                error "Failed to install CUDA keyring package (dpkg returned $?)"
+                rm -f "$CUDA_KEYRING_PATH"
+                warn "CUDA installation will be skipped"
+                INSTALL_CUDA=false
+            fi
+        else
+            error "Failed to download CUDA keyring after 3 attempts"
+            error "URL: $CUDA_KEYRING_URL"
+            warn "Please check:"
+            warn "  1. Internet connection"
+            warn "  2. Repository availability"
+            warn "  3. DNS resolution"
+            warn "CUDA installation will be skipped"
+            INSTALL_CUDA=false
+        fi
+
+        # Install CUDA packages (only if keyring installation succeeded)
+        if $INSTALL_CUDA; then
+            # In WSL, install a toolkit-only metapackage. The broad "cuda"
+            # metapackage can pull Linux driver packages that are not wanted in WSL.
+            if CUDA_TOOLKIT_PACKAGE=$(resolve_cuda_toolkit_package); then
+                log "Found CUDA toolkit metapackage: $CUDA_TOOLKIT_PACKAGE"
+                if safe_install "$CUDA_TOOLKIT_PACKAGE"; then
+                    log "CUDA toolkit package installed: $CUDA_TOOLKIT_PACKAGE"
+                else
+                    warn "CUDA toolkit installation failed: $CUDA_TOOLKIT_PACKAGE"
+                    INSTALL_CUDA=false
+                fi
+            else
+                warn "No CUDA toolkit metapackage available in APT cache"
+                log "Repository: https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_REPO_PATH}/"
+                log "Try running: apt-cache policy cuda-toolkit cuda-toolkit-13 cuda-toolkit-13-2"
+                INSTALL_CUDA=false
+            fi
+        fi  # End of: if $INSTALL_CUDA (package installation check)
+    fi  # End of: if $INSTALL_CUDA
+    
+    # Configure CUDA environment variables (MOVED OUTSIDE if $INSTALL_CUDA)
+    # This runs regardless of whether we just installed CUDA or it was already installed
+    if [ -d "/usr/local/cuda" ]; then
+        log "Configuring CUDA environment variables..."
+
+        # Create system-wide CUDA environment file
+        cat > /etc/profile.d/cuda.sh <<'CUDAEOF'
+# CUDA Toolkit Environment
+# Automatically configured by WSL2 optimization script
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+export CUDA_HOME=/usr/local/cuda
+CUDAEOF
+        chmod +x /etc/profile.d/cuda.sh
+        log "✓ Created /etc/profile.d/cuda.sh"
+
+        # Function to add CUDA to user's .bashrc
+        add_cuda_to_bashrc() {
+            local bashrc_path=$1
+            if [ -f "$bashrc_path" ]; then
+                if ! grep -q "cuda/bin" "$bashrc_path"; then
+                    cat >> "$bashrc_path" <<'BASHCUDA'
+
+# CUDA Toolkit environment
+export PATH=/usr/local/cuda/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
+export CUDA_HOME=/usr/local/cuda
+BASHCUDA
+                    log "✓ Added CUDA configuration to $bashrc_path"
+                fi
+            fi
+        }
+
+        # Add to root's .bashrc
+        add_cuda_to_bashrc "/root/.bashrc"
+
+        # Add to regular user's .bashrc if exists
+        if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "root" ]; then
+            user_home=$(common_user_home "$NEW_USER" || echo "/home/$NEW_USER")
+            add_cuda_to_bashrc "$user_home/.bashrc"
+        fi
+
+        # Add to docker user's .bashrc if different
+        if [ -n "$DOCKER_USER" ] && [ "$DOCKER_USER" != "root" ] && [ "$DOCKER_USER" != "$NEW_USER" ]; then
+            user_home=$(common_user_home "$DOCKER_USER" || echo "/home/$DOCKER_USER")
+            add_cuda_to_bashrc "$user_home/.bashrc"
+        fi
+
+        # Verify CUDA installation
+        if [ -f "/usr/local/cuda/bin/nvcc" ]; then
+            CUDA_VERSION=$(/usr/local/cuda/bin/nvcc --version 2>/dev/null | grep "release" | awk '{print $5}' | sed 's/,//')
+            log "✓ CUDA Compiler (nvcc) installed: version $CUDA_VERSION"
+            log "✓ CUDA installation successful!"
+            info "Run 'source /etc/profile.d/cuda.sh' or start a new terminal to use CUDA"
+        else
+            warn "CUDA compiler (nvcc) not found in /usr/local/cuda/bin"
+            info "CUDA may not be fully installed. Check with: apt list --installed | grep cuda"
+        fi
+    else
+        if $INSTALL_CUDA; then
+            warn "/usr/local/cuda directory not found after installation"
+            warn "CUDA packages may have been installed but symlink not created"
+            info "Check available CUDA versions: ls -la /usr/local/ | grep cuda"
+        fi
+    fi
+    
+else
+    log "Skipping NVIDIA installation"
+fi
+
+################################################################################
+# 13. Performance Tuning
+################################################################################
+section "${SYMBOL_ROCKET} Performance Tuning"
+
+if $PERFORMANCE_TUNING; then
+    log "Applying performance optimizations..."
+    
+    # System limits (optimized for 32GB RAM and ML/AI)
+    cat > /etc/security/limits.d/99-wsl2-limits.conf <<EOF
+# WSL2 Performance Limits - High Performance (32GB RAM)
+
+# Open file limits (for large projects and datasets)
+* soft nofile 524288
+* hard nofile 524288
+root soft nofile 524288
+root hard nofile 524288
+
+# Process limits (for parallel ML/AI training)
+* soft nproc 131072
+* hard nproc 131072
+root soft nproc 131072
+root hard nproc 131072
+
+# Memory lock (for CUDA and GPU memory pinning)
+* soft memlock unlimited
+* hard memlock unlimited
+
+# Core dump size (for debugging)
+* soft core unlimited
+* hard core unlimited
+
+EOF
+
+    # Ensure /etc/sysctl.conf exists (some minimal Debian installations don't have it)
+    if [ ! -f /etc/sysctl.conf ]; then
+        log "Creating /etc/sysctl.conf (was missing)..."
+        cat > /etc/sysctl.conf <<'SYSCTLCONF'
+#
+# /etc/sysctl.conf - Configuration file for setting system variables
+# See /etc/sysctl.d/ for additional system variables.
+# See sysctl.conf (5) for information.
+#
+
+# Additional settings are in /etc/sysctl.d/
+SYSCTLCONF
+    fi
+
+    # Kernel parameters for WSL2 (High Performance: 32GB RAM, i7-13700K, RTX 4090)
+    cat > /etc/sysctl.d/99-wsl2-optimization.conf <<EOF
+# WSL2 Optimization - High Performance (32GB RAM, i7-13700K, RTX 4090)
+# Optimized for ML/AI workloads, development, and GPU computing
+
+# ============================================================================
+# Network Performance - Maximum buffers for 32GB RAM
+# ============================================================================
+
+# TCP/UDP Buffer Sizes (aggressive for 32GB RAM)
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.core.rmem_max = 67108864
+net.core.wmem_max = 67108864
+net.ipv4.tcp_rmem = 4096 524288 67108864
+net.ipv4.tcp_wmem = 4096 524288 67108864
+
+# Network Queues (high throughput)
+net.core.netdev_max_backlog = 32768
+net.core.somaxconn = 16384
+net.ipv4.tcp_max_syn_backlog = 32768
+
+# TCP Performance
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.ip_local_port_range = 10240 65535
+
+# TCP Fast Open
+net.ipv4.tcp_fastopen = 3
+
+# TCP Window Scaling & SACK
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_timestamps = 1
+net.ipv4.tcp_sack = 1
+
+# MTU Probing
+net.ipv4.tcp_mtu_probing = 1
+
+# TCP Orphan & TIME_WAIT limits
+net.ipv4.tcp_max_orphans = 65536
+net.ipv4.tcp_max_tw_buckets = 262144
+
+# ============================================================================
+# Virtual Memory - Aggressive caching for 32GB RAM
+# ============================================================================
+vm.swappiness = 1
+vm.vfs_cache_pressure = 40
+vm.dirty_ratio = 30
+vm.dirty_background_ratio = 10
+vm.dirty_expire_centisecs = 6000
+vm.dirty_writeback_centisecs = 500
+vm.min_free_kbytes = 262144
+vm.overcommit_memory = 1
+vm.overcommit_ratio = 80
+vm.zone_reclaim_mode = 0
+
+# Memory mapping (for large datasets and ML models)
+vm.max_map_count = 262144
+
+# ============================================================================
+# File System Performance (for large datasets)
+# ============================================================================
+fs.file-max = 4194304
+fs.inotify.max_user_watches = 2097152
+fs.inotify.max_user_instances = 2048
+
+# ============================================================================
+# Shared Memory (for CUDA and multi-process ML/AI)
+# ============================================================================
+kernel.shmmax = 68719476736
+kernel.shmall = 16777216
+
+# ============================================================================
+# Kernel Performance (ML/AI workloads)
+# ============================================================================
+kernel.sched_migration_cost_ns = 5000000
+kernel.sched_autogroup_enabled = 0
+kernel.pid_max = 131072
+kernel.threads-max = 131072
+
+# Entropy (for cryptography)
+kernel.random.write_wakeup_threshold = 1024
+
+# ============================================================================
+# Security
+# ============================================================================
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+EOF
+
+    # Enable Transparent Huge Pages for ML/AI (if available)
+    if [ -f /sys/kernel/mm/transparent_hugepage/enabled ]; then
+        log "Enabling Transparent Huge Pages for ML/AI workloads..."
+        echo always > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
+        echo defer > /sys/kernel/mm/transparent_hugepage/defrag 2>/dev/null || true
+    fi
+
+    # Apply sysctl settings with error tolerance for missing parameters
+    # Some parameters may not exist in WSL2 environment
+    sysctl -e -p /etc/sysctl.d/99-wsl2-optimization.conf 2>&1 | grep -v "cannot stat" | grep -v "No such file or directory" || true
+    log "Kernel parameters applied (some may be skipped in WSL2 environment)"
+
+    # I/O scheduler optimization (for high-performance NVMe)
+    cat > /etc/udev/rules.d/60-ioschedulers.conf <<'EOF'
+# I/O Scheduler Optimization for WSL2 (High Performance)
+
+# NVMe drives - use 'none' scheduler (best for high-end NVMe)
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none"
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/nr_requests}="2048"
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/read_ahead_kb}="1024"
+ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/rq_affinity}="2"
+
+# SSD drives - use 'mq-deadline' scheduler
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/nr_requests}="1024"
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="1024"
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/rq_affinity}="2"
+EOF
+    
+    log "Performance tuning applied"
+else
+    log "Skipping performance tuning"
+fi
+
+################################################################################
+# 14. Automatic Security Updates
+################################################################################
+section "${SYMBOL_GEAR} Automatic Security Updates"
+
+if $ENABLE_AUTO_UPDATES; then
+    log "Configuring automatic security updates..."
+    
+    # Install unattended-upgrades with availability check
+    safe_install unattended-upgrades apt-listchanges
+    
+    common_render_debian_unattended_upgrades_conf > /etc/apt/apt.conf.d/50unattended-upgrades
+    common_render_apt_periodic_auto_upgrades_conf > /etc/apt/apt.conf.d/20auto-upgrades
+
+    log "Automatic security updates configured"
+else
+    log "Skipping automatic security updates"
+fi
+
+################################################################################
+# 15. Create Utility Scripts
+################################################################################
+section "${SYMBOL_GEAR} Creating Utility Scripts"
+
+# WSL2 Performance Monitor
+cat > /usr/local/bin/wsl2-monitor.sh <<'SCRIPT'
+#!/bin/bash
+
+echo "=== WSL2 System Monitor ==="
+echo ""
+echo "=== System Information ==="
+echo "Hostname: $(hostname)"
+echo "OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d'"' -f2)"
+echo "Kernel: $(uname -r)"
+echo "Uptime: $(uptime -p)"
+echo ""
+
+echo "=== CPU Usage ==="
+top -bn1 | head -n 5
+
+echo ""
+echo "=== Memory Usage ==="
+free -h
+
+echo ""
+echo "=== Disk Usage ==="
+df -h | grep -v tmpfs
+
+echo ""
+echo "=== WSL2 Specific ==="
+# Try to get WSL version from wsl.exe (available from Windows side)
+WSL_VERSION=$(wsl.exe --version 2>/dev/null | grep -o "WSL: [0-9.]*" | cut -d: -f2 | xargs)
+
+# If wsl.exe not available, try to get WSL kernel version from /proc/version
+if [ -z "$WSL_VERSION" ]; then
+    KERNEL_VERSION=$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' /proc/version 2>/dev/null | head -1)
+    if [ -n "$KERNEL_VERSION" ]; then
+        echo "WSL Version: $KERNEL_VERSION (kernel)"
+    else
+        echo "WSL Version: Unknown (run from Windows PowerShell: wsl --version)"
+    fi
+else
+    echo "WSL Version: $WSL_VERSION"
+fi
+echo "GPU Support: $([ -e /dev/dxg ] && echo 'Available' || echo 'Not Available')"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    NVIDIA_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits 2>/dev/null | head -1)
+    if [ -n "$NVIDIA_VERSION" ]; then
+        echo "NVIDIA Driver: $NVIDIA_VERSION"
+    fi
+fi
+
+echo ""
+echo "=== Top 5 Processes by Memory ==="
+ps aux --sort=-%mem | head -6
+
+echo ""
+echo "=== Top 5 Processes by CPU ==="
+ps aux --sort=-%cpu | head -6
+SCRIPT
+
+chmod +x /usr/local/bin/wsl2-monitor.sh
+
+# WSL2 Cleanup Script
+cat > /usr/local/bin/wsl2-cleanup.sh <<'SCRIPT'
+#!/bin/bash
+
+echo "Starting WSL2 cleanup..."
+
+# Clean package cache
+apt-get clean
+apt-get autoclean
+apt-get autoremove -y
+
+# Clean journal logs
+journalctl --vacuum-time=7d
+
+# Clean temp files
+find /tmp -type f -atime +7 -delete 2>/dev/null || true
+find /var/tmp -type f -atime +7 -delete 2>/dev/null || true
+
+# Clean Docker if installed
+if command -v docker >/dev/null 2>&1; then
+    docker system prune -f
+fi
+
+# Clear package lists to save space
+rm -rf /var/lib/apt/lists/* 2>/dev/null || true
+
+echo "WSL2 cleanup completed!"
+SCRIPT
+
+chmod +x /usr/local/bin/wsl2-cleanup.sh
+
+# WSL2 Backup Script
+cat > /usr/local/bin/wsl2-backup.sh <<'SCRIPT'
+#!/bin/bash
+
+BACKUP_DIR="/mnt/c/WSL-Backups/$(date +%Y%m%d)"
+mkdir -p "$BACKUP_DIR"
+
+echo "Creating WSL2 backup to $BACKUP_DIR"
+
+# Backup configuration files
+cp /etc/wsl.conf "$BACKUP_DIR/" 2>/dev/null || true
+cp /etc/docker/daemon.json "$BACKUP_DIR/" 2>/dev/null || true
+
+# Backup user configurations
+if [ -n "$1" ]; then
+    USER_HOME="/home/$1"
+    if [ -d "$USER_HOME" ]; then
+        tar -czf "$BACKUP_DIR/home-$1-$(date +%H%M%S).tar.gz" -C "$(dirname "$USER_HOME")" "$(basename "$USER_HOME")"
+    fi
+fi
+
+echo "Backup completed: $BACKUP_DIR"
+SCRIPT
+
+chmod +x /usr/local/bin/wsl2-backup.sh
+
+# Create weekly cron job for cleanup
+cat > /etc/cron.weekly/wsl2-cleanup <<'EOF'
+#!/bin/bash
+/usr/local/bin/wsl2-cleanup.sh >> /var/log/wsl2-cleanup.log 2>&1
+EOF
+
+chmod +x /etc/cron.weekly/wsl2-cleanup
+
+log "Utility scripts created"
+
+
+################################################################################
+# 16. Configure systemd-journald
+################################################################################
+
+section "${SYMBOL_GEAR} systemd-journald Configuration"
+
+if $CONFIGURE_JOURNALD; then
+    if has_systemd; then
+        log "Configuring systemd-journald for WSL2..."
+
+        mkdir -p /etc/systemd/journald.conf.d
+
+        cat > /etc/systemd/journald.conf.d/00-wsl2.conf <<'JOURNALD_EOF'
+[Journal]
+SystemMaxUse=100M
+SystemKeepFree=500M
+SystemMaxFileSize=10M
+SystemMaxFiles=10
+RuntimeMaxUse=50M
+RuntimeKeepFree=100M
+RuntimeMaxFileSize=10M
+RuntimeMaxFiles=5
+MaxRetentionSec=1week
+MaxFileSec=1day
+Compress=yes
+ForwardToSyslog=no
+ForwardToWall=no
+SyncIntervalSec=5m
+JOURNALD_EOF
+
+        if service_actions_available; then
+            systemctl restart systemd-journald 2>&1 | tee -a "$LOG_FILE" || warn "Failed to restart journald"
+        else
+            note_post_restart "systemd-journald limits were written; they will be applied after the next WSL restart."
+        fi
+        journalctl --vacuum-size=100M --vacuum-time=1week 2>&1 | tee -a "$LOG_FILE" || true
+
+        journal_size=$(journalctl --disk-usage 2>/dev/null | grep -oP 'Archived and active journals take up \K[^.]+' || echo "unknown")
+        log "✓ systemd-journald configured"
+        info "  Max: 100MB disk + 50MB RAM, Current: $journal_size"
+    else
+        warn "systemd not available"
+    fi
+else
+    log "Skipping systemd-journald configuration"
+fi
+
+################################################################################
+# 17. Final Cleanup
+################################################################################
+section "${SYMBOL_GEAR} Final Cleanup"
+
+progress "Performing final cleanup..."
+
+# Clean package cache silently
+apt-get clean >/dev/null 2>&1
+apt-get autoclean >/dev/null 2>&1
+apt-get autoremove -y >/dev/null 2>&1
+
+# Clear journal logs silently
+journalctl --vacuum-time=3d >/dev/null 2>&1
+
+log "Cleanup completed"
+
+################################################################################
+# 17. Final Summary and Instructions
+################################################################################
+section "${SYMBOL_CHECK} Installation Complete"
+
+echo ""
+ui_success_title "${SYMBOL_CHECK} WSL2 optimization complete"
+subsection "Summary of optimizations"
+log "OS detected: $OS_NAME $OS_VERSION ($OS_CODENAME)"
+
+if $CONFIGURE_WSL_CONF; then
+    log "WSL2 configuration (wsl.conf) with systemd"
+fi
+
+if $UPDATE_SYSTEM; then
+    log "System packages updated"
+fi
+
+if $INSTALL_BASE_UTILS; then
+    log "Base utilities installed (neovim, tmux, ncdu, etc.)"
+fi
+
+if [ -n "$NEW_USER" ]; then
+    if $USER_WAS_CREATED; then
+        log "New user created: $NEW_USER (with sudo access)"
+    elif $CREATE_USER; then
+        log "Existing user configured: $NEW_USER (with sudo access)"
+    fi
+fi
+
+if $CONFIGURE_LOCALES; then
+    log "Locale configured: ${DEFAULT_LOCALE:-en_US.UTF-8}"
+fi
+
+if $INSTALL_FISH; then
+    log "Fish + Starship installed with WSL2 optimizations"
+fi
+
+log "Bash modernized with optimizations"
+
+if $INSTALL_DOCKER; then
+    log "Docker CE + Docker Compose installed"
+fi
+
+if $INSTALL_NVIDIA; then
+    log "NVIDIA Container Toolkit installed"
+    if $INSTALL_CUDA; then
+        log "CUDA Toolkit installed"
+    fi
+fi
+
+if $PERFORMANCE_TUNING; then
+    log "Performance tuning applied"
+fi
+
+if $ENABLE_AUTO_UPDATES; then
+    log "Automatic security updates enabled"
+fi
+
+echo ""
+subsection "Created utility scripts"
+info "wsl2-monitor.sh   - WSL2 system monitoring"
+info "wsl2-cleanup.sh   - System cleanup (runs weekly)"
+info "wsl2-backup.sh    - Backup configuration"
+
+echo ""
+subsection "Important next steps"
+
+if [ -n "$NEW_USER" ] && $CREATE_USER; then
+    warn "Run 'wsl --shutdown' in Windows PowerShell to apply default user"
+    info "After restart: you will login as $NEW_USER"
+    echo ""
+fi
+
+if $CONFIGURE_WSL_CONF; then
+    warn "Run 'wsl --shutdown' in Windows PowerShell to apply WSL2 configuration"
+fi
+
+if $INSTALL_FISH; then
+    echo ""
+    info "New interactive shell sessions will start with Fish + Starship"
+    info "WSL2 functions: explorer(), cmd(), powershell(), wslperf()"
+fi
+
+if $INSTALL_DOCKER && [ -n "$DOCKER_USER" ]; then
+    echo ""
+    info "Docker group: relogin or run 'newgrp docker'"
+fi
+
+if [ ${#POST_RESTART_NOTES[@]} -gt 0 ]; then
+    echo ""
+    subsection "After-restart checklist"
+    for note in "${POST_RESTART_NOTES[@]}"; do
+        info "$note"
+    done
+fi
+
+echo ""
+subsection "WSL2 performance tips"
+info "Create %USERPROFILE%\\.wslconfig in Windows:"
+echo -e "    ${DIM}[wsl2]${NC}"
+echo -e "    ${DIM}memory=8GB${NC}"
+echo -e "    ${DIM}processors=4${NC}"
+echo -e "    ${DIM}autoMemoryReclaim=dropCache${NC}"
+echo -e "    ${DIM}sparseVhd=true${NC}"
+echo ""
+info "Run 'wsl2-monitor.sh' for system performance monitoring"
+info "Run 'wsl2-cleanup.sh' for periodic maintenance"
+echo ""
+
+ui_success_title "${SYMBOL_ROCKET} WSL2 optimization successfully completed"
+echo ""
+
+# Show system information if available
+FETCH_CMD=$(resolve_fetch_command || true)
+if [ -n "$FETCH_CMD" ]; then
+    "$FETCH_CMD"
+else
+    info "System info tool not installed (fastfetch/neofetch unavailable for this release)"
+fi

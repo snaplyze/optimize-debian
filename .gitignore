@@ -1,0 +1,13 @@
+# Local agent/editor metadata
+.codex
+.vscode/
+.idea/
+
+# Editor swap and backup files
+*~
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
