@@ -393,7 +393,13 @@ LOG_FILE="/var/log/wsl2_optimization.log"
 
 # Log to file only (silent)
 log_silent() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    [ -n "${LOG_FILE:-}" ] || return 0
+    local log_dir
+    log_dir="$(dirname "$LOG_FILE" 2>/dev/null || echo "")"
+    if [ -w "$LOG_FILE" ] || { [ ! -e "$LOG_FILE" ] && [ -n "$log_dir" ] && [ -w "$log_dir" ]; }; then
+        mkdir -p "$log_dir" 2>/dev/null || return 0
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 ui_backend() {
@@ -876,7 +882,7 @@ sudo_or_su() {
 }
 
 # Check if running as root
-if [[ $EUID -ne 0 ]]; then
+if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" && $EUID -ne 0 ]]; then
    error "This script must be run as root (use sudo)"
    exit 1
 fi

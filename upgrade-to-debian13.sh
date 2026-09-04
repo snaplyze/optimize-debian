@@ -180,8 +180,9 @@ can_continue_two_hop_no_reboot() {
 
 # ── Предварительные проверки ─────────────────────────────────────────────────
 require_root() {
-  if [[ $EUID -ne 0 ]]; then
-    die "Запустите от root: sudo $0 [--yes]"
+  if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" && $EUID -ne 0 ]]; then
+    err "Этот скрипт должен быть запущен с правами root (используйте sudo)"
+    exit 1
   fi
 }
 

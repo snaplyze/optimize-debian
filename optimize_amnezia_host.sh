@@ -127,8 +127,13 @@ SYMBOL_WARN="⚠"
 SYMBOL_INFO="ℹ"
 
 log_silent() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE"
+    [ -n "${LOG_FILE:-}" ] || return 0
+    local log_dir
+    log_dir="$(dirname "$LOG_FILE" 2>/dev/null || echo "")"
+    if [ -w "$LOG_FILE" ] || { [ ! -e "$LOG_FILE" ] && [ -n "$log_dir" ] && [ -w "$log_dir" ]; }; then
+        mkdir -p "$log_dir" 2>/dev/null || return 0
+        printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 ui_clean_heading() {
@@ -1170,8 +1175,8 @@ print_summary() {
 main() {
     parse_args "$@"
 
-    if [ "$(id -u)" -ne 0 ]; then
-        error "Run this script as root"
+    if [ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" ] && [ "$(id -u)" -ne 0 ]; then
+        error "This script must be run as root (use sudo)"
         exit 1
     fi
 

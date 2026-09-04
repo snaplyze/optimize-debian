@@ -329,7 +329,13 @@ LOG_FILE="/var/log/minipc_optimization.log"
 
 # Silent logging (to file only)
 log_silent() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+    [ -n "${LOG_FILE:-}" ] || return 0
+    local log_dir
+    log_dir="$(dirname "$LOG_FILE" 2>/dev/null || echo "")"
+    if [ -w "$LOG_FILE" ] || { [ ! -e "$LOG_FILE" ] && [ -n "$log_dir" ] && [ -w "$log_dir" ]; }; then
+        mkdir -p "$log_dir" 2>/dev/null || return 0
+        echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 }
 
 ui_backend() {
