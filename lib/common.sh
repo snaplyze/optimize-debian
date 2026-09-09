@@ -1,5 +1,27 @@
 #!/usr/bin/env bash
 
+common_generate_utf8_locales() {
+    local locale_file="${1:-/etc/locale.gen}"
+    local locale_name available_locales
+
+    touch "$locale_file" || return
+    for locale_name in en_US ru_RU; do
+        sed -i -E "/^[[:space:]#]*${locale_name}\\.UTF-8[[:space:]]+UTF-8([[:space:]]|$)/d" "$locale_file" || return
+        printf '%s.UTF-8 UTF-8\n' "$locale_name" >> "$locale_file" || return
+    done
+
+    # Keep locales compiled outside locale.gen, including those supplied by the image.
+    LC_ALL=C LANG=C locale-gen --keep-existing || return
+    available_locales="$(LC_ALL=C LANG=C locale -a)" || return
+    for locale_name in en_US ru_RU; do
+        # locale-gen can succeed even when an individual localedef invocation fails.
+        if ! grep -Eiq "^${locale_name}\\.(utf8|utf-8)$" <<< "$available_locales"; then
+            printf 'Locale generation failed: %s.UTF-8 is unavailable\n' "$locale_name" >&2
+            return 1
+        fi
+    done
+}
+
 common_is_supported_debian_version() {
     case "${1%%.*}" in
         12|13) return 0 ;;
@@ -154,5 +176,4 @@ common_safe_write_sudoers() {
 
     return 0
 }
-
 

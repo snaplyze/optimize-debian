@@ -22,6 +22,30 @@ if [ -r "$SCRIPT_DIR/lib/common.sh" ]; then
     source "$SCRIPT_DIR/lib/common.sh"
 fi
 
+if ! declare -F common_generate_utf8_locales >/dev/null; then
+    common_generate_utf8_locales() {
+        local locale_file="${1:-/etc/locale.gen}"
+        local locale_name available_locales
+
+        touch "$locale_file" || return
+        for locale_name in en_US ru_RU; do
+            sed -i -E "/^[[:space:]#]*${locale_name}\\.UTF-8[[:space:]]+UTF-8([[:space:]]|$)/d" "$locale_file" || return
+            printf '%s.UTF-8 UTF-8\n' "$locale_name" >> "$locale_file" || return
+        done
+
+        # Keep locales compiled outside locale.gen, including those supplied by the image.
+        LC_ALL=C LANG=C locale-gen --keep-existing || return
+        available_locales="$(LC_ALL=C LANG=C locale -a)" || return
+        for locale_name in en_US ru_RU; do
+            # locale-gen can succeed even when an individual localedef invocation fails.
+            if ! grep -Eiq "^${locale_name}\\.(utf8|utf-8)$" <<< "$available_locales"; then
+                printf 'Locale generation failed: %s.UTF-8 is unavailable\n' "$locale_name" >&2
+                return 1
+            fi
+        done
+    }
+fi
+
 if ! declare -F common_is_supported_debian_version >/dev/null; then
     common_is_supported_debian_version() {
         case "${1%%.*}" in
@@ -747,6 +771,13 @@ install_base_packages() {
     safe_install ca-certificates curl sudo gnupg lsb-release nftables iptables ufw fail2ban python3-systemd
 }
 
+configure_locales() {
+    section "UTF-8 locales for SSH sessions"
+    safe_install locales
+    common_generate_utf8_locales /etc/locale.gen
+    log "English and Russian UTF-8 locales are available; system language preserved"
+}
+
 configure_time_sync() {
     section "Time synchronization"
     TIME_SYNC_SERVICE_NAME="Not configured"
@@ -1193,6 +1224,7 @@ main() {
     confirm_execution
 
     install_base_packages
+    configure_locales
     install_backports_kernel
     create_target_user_if_needed
     ensure_target_user_privileges

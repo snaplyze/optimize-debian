@@ -83,7 +83,7 @@ sudo ./optimize_mini_pc.sh
 При запуске вам будет предложено выбрать компоненты установки. TUI сделан в стиле `arch-linux-installer.sh`: основной backend — Charmbracelet `gum`; `dialog`/`whiptail` не выбираются автоматически, чтобы не показывать fullscreen blue-screen UI.
 
 1.  **System Update:** Обновление пакетов и установка базы (`curl`, `git`, `htop`, `vim`).
-2.  **Locales & Timezone:** Настройка русской/английской локали, часового пояса и time sync (с проверкой существующего NTP daemon и fallback на `systemd-timesyncd`).
+2.  **Locales & Timezone:** При включённом шаге генерируются обе локали `ru_RU.UTF-8` и `en_US.UTF-8`; меню выбирает язык по умолчанию через штатный `update-locale` Debian 12/13, без постоянного `LC_ALL`. Настраиваются часовой пояс и time sync (с проверкой существующего NTP daemon и fallback на `systemd-timesyncd`). [Исправление ошибки локали на уже настроенном сервере](README_AMNEZIA_HOST.md#ошибка-setlocale-при-входе-по-ssh).
 3.  **User & Security:** Создание sudo-пользователя (атомарная валидация `visudo`), настройка SSH (ключи), UFW (фаервол) и Fail2Ban (`backend = systemd`).
 4.  **Kernel & Hardware:** Установка официального ядра Debian Backports и драйверов Intel GPU.
 5.  **Storage Optimization:** Настройка TRIM и планировщиков ввода/вывода.

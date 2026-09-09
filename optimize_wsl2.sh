@@ -36,6 +36,30 @@ if [ -r "$SCRIPT_DIR/lib/tui.sh" ]; then
     source "$SCRIPT_DIR/lib/tui.sh"
 fi
 
+if ! declare -F common_generate_utf8_locales >/dev/null; then
+    common_generate_utf8_locales() {
+        local locale_file="${1:-/etc/locale.gen}"
+        local locale_name available_locales
+
+        touch "$locale_file" || return
+        for locale_name in en_US ru_RU; do
+            sed -i -E "/^[[:space:]#]*${locale_name}\\.UTF-8[[:space:]]+UTF-8([[:space:]]|$)/d" "$locale_file" || return
+            printf '%s.UTF-8 UTF-8\n' "$locale_name" >> "$locale_file" || return
+        done
+
+        # Keep locales compiled outside locale.gen, including those supplied by the image.
+        LC_ALL=C LANG=C locale-gen --keep-existing || return
+        available_locales="$(LC_ALL=C LANG=C locale -a)" || return
+        for locale_name in en_US ru_RU; do
+            # locale-gen can succeed even when an individual localedef invocation fails.
+            if ! grep -Eiq "^${locale_name}\\.(utf8|utf-8)$" <<< "$available_locales"; then
+                printf 'Locale generation failed: %s.UTF-8 is unavailable\n' "$locale_name" >&2
+                return 1
+            fi
+        done
+    }
+fi
+
 if ! declare -F common_is_supported_debian_version >/dev/null; then
     common_is_supported_debian_version() {
         case "${1%%.*}" in
@@ -1354,71 +1378,45 @@ check_dialog() {
 }
 
 # Locale selection
-    echo "Select system locale:"
+    echo "Select default system locale (English and Russian UTF-8 are always generated):"
     echo "1) en_US.UTF-8 (English)"
     echo "2) ru_RU.UTF-8 (Russian)"
-    echo "3) Both (en_US.UTF-8 + ru_RU.UTF-8)"
+    echo "3) Both (en_US.UTF-8 as default)"
     
-    if ! LOCALE_CHOICE=$(tui_radiolist "Locale Selection" "Select locale:" 15 60 3 "1" "English (en_US.UTF-8)" on "2" "Russian (ru_RU.UTF-8)" off "3" "Both (en_US.UTF-8 + ru_RU.UTF-8)" off); then
+    if ! LOCALE_CHOICE=$(tui_radiolist "Default Locale" "Select default language (both UTF-8 locales will be generated):" 15 60 3 "1" "English (en_US.UTF-8)" on "2" "Russian (ru_RU.UTF-8)" off "3" "Both (English as default)" off); then
         read -r -p "Enter choice [1-3]: " LOCALE_CHOICE
     fi
     
     case $LOCALE_CHOICE in
         1)
-            LOCALE_TO_GENERATE="en_US.UTF-8"
             DEFAULT_LOCALE="en_US.UTF-8"
             ;;
         2)
-            LOCALE_TO_GENERATE="ru_RU.UTF-8"
             DEFAULT_LOCALE="ru_RU.UTF-8"
             ;;
         3)
-            LOCALE_TO_GENERATE="en_US.UTF-8 ru_RU.UTF-8"
             DEFAULT_LOCALE="en_US.UTF-8"
             ;;
         *)
             warn "Invalid choice. Using English (en_US.UTF-8) as default"
-            LOCALE_TO_GENERATE="en_US.UTF-8"
             DEFAULT_LOCALE="en_US.UTF-8"
             ;;
     esac
     
-    # Generate locales
-    for locale in $LOCALE_TO_GENERATE; do
-        # Remove all existing entries for this locale (both commented and uncommented)
-        sed -i "/^#* *${locale} UTF-8/d" /etc/locale.gen
-        
-        # Add a single uncommented entry
-        echo "${locale} UTF-8" >> /etc/locale.gen
-    done
-
-    # Generate locales with C.UTF-8 to avoid LC_ALL=C conflicts
-    unset LC_ALL
-    unset LANG
-    export LC_ALL=C.UTF-8
-    export LANG=C.UTF-8
-    /usr/sbin/locale-gen
-    unset LC_ALL
-    unset LANG
-
-    # Update locale configuration file
-    cat > /etc/default/locale <<EOF
-LANG=$DEFAULT_LOCALE
-LANGUAGE=${DEFAULT_LOCALE%%.*}
-LC_ALL=$DEFAULT_LOCALE
-EOF
+    # Support both SSH client locales regardless of the selected default language.
+    common_generate_utf8_locales /etc/locale.gen
+    # Debian 12 uses /etc/default/locale; Debian 13 uses /etc/locale.conf.
+    update-locale --reset "LANG=$DEFAULT_LOCALE" "LANGUAGE=${DEFAULT_LOCALE%%.*}"
 
     # Write to profile for all users (will be sourced on login)
     cat > /etc/profile.d/locale.sh <<EOF
 export LANG=$DEFAULT_LOCALE
-export LC_ALL=$DEFAULT_LOCALE
 export LANGUAGE=${DEFAULT_LOCALE%%.*}
 EOF
 
     chmod +x /etc/profile.d/locale.sh
 
-    # DO NOT export locale in current session - it may not be fully ready
-    # Wait for restart for locale to be properly applied
+    # Keep C for provisioning; the login profile applies the selected default.
     log "Locale configured: $DEFAULT_LOCALE"
     info "Locale will be fully applied after WSL restart"
 else
