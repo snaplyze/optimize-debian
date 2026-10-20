@@ -69,7 +69,7 @@ Match existing filenames: lowercase, underscore-separated, environment-specific,
 - **Username validation**: `optimize_vps.sh` and `optimize_mini_pc.sh` include retry loops for username input — preserve this pattern when modifying user-creation logic.
 - **Debian Backports kernel**: VPS, mini-PC, and Amnezia host scripts configure `bookworm-backports` on Debian 12 to install the latest official Debian LTS kernel (`linux-image-${ARCH}`, `linux-headers-${ARCH}`). Debian 13 uses its modern mainline kernel.
 - **Fish shell + Starship**: All optimize scripts configure Fish shell with the Starship `nerd-font-symbols` preset. User default shell in `/etc/passwd` remains `/bin/bash` for non-interactive POSIX compatibility; interactive sessions auto-switch to Fish via `~/.bashrc`.
-- **Atomic Sudoers Validation**: Any changes to `/etc/sudoers.d/*` must use `common_safe_write_sudoers` (or its embedded fallback) to validate syntax via `visudo -cf` before committing, auto-removing the file on error.
+- **Atomic Sudoers Validation**: Any changes to `/etc/sudoers.d/*` must use `common_safe_write_sudoers` (or its embedded fallback) to validate syntax via `visudo -cf` on a temporary file before moving it into place; on error the temporary file is removed and the previous file stays unchanged.
 - **Reverse Path Filtering**: All optimize scripts configure Loose `rp_filter = 2` (`net.ipv4.conf.all.rp_filter = 2` and `default.rp_filter = 2`) to ensure proper asymmetric packet routing for WireGuard, AmneziaWG, OpenVPN, and Docker bridge interfaces.
 - **CUDA**: `optimize_wsl2.sh` uses the official NVIDIA `cuda-keyring` method targeting the detected Debian version (`debian12` or `debian13` for amd64). Do not install broad `cuda` metapackages in WSL.
 

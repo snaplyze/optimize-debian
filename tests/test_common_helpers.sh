@@ -94,24 +94,63 @@ test_user_home() {
 }
 
 test_safe_write_sudoers() {
-    local temp_file
-    temp_file="$(mktemp)"
-    rm -f "$temp_file"
+    local dir target
 
-    # Valid syntax should succeed
-    common_safe_write_sudoers "$temp_file" "root ALL=(ALL) NOPASSWD:ALL"
-    [ -f "$temp_file" ] || fail "common_safe_write_sudoers did not create target file"
-    grep -q "root ALL=(ALL) NOPASSWD:ALL" "$temp_file" || fail "content mismatch"
-    rm -f "$temp_file"
-
-    # Invalid syntax must fail and remove the target file
-    if command -v visudo >/dev/null 2>&1 || [ -x /usr/sbin/visudo ]; then
-        assert_status 2 common_safe_write_sudoers "$temp_file" "invalid sudoers syntax ??? !!!"
-        [ ! -f "$temp_file" ] || fail "invalid sudoers file should not exist after failure"
-        rm -f "$temp_file"
-    else
-        printf 'SKIP: invalid sudoers syntax case of common_safe_write_sudoers: visudo is not installed\n'
+    if ! command -v visudo >/dev/null 2>&1 && [ ! -x /usr/sbin/visudo ]; then
+        printf 'SKIP: common_safe_write_sudoers cases: visudo is not installed\n'
+        return 0
     fi
+
+    dir="$(mktemp -d)"
+    SUDOERS_TEST_DIR="$dir"
+    trap 'chmod -R u+w "${SUDOERS_TEST_DIR:-}" 2>/dev/null || true; rm -rf "${SUDOERS_TEST_DIR:-}"' EXIT
+    target="$dir/sudoers.d/ops"
+
+    assert_status 1 common_safe_write_sudoers "" "root ALL=(ALL) NOPASSWD:ALL"
+    assert_status 1 common_safe_write_sudoers "$target" ""
+
+    # Valid content: written as the target with the sudoers mode.
+    common_safe_write_sudoers "$target" "ops ALL=(ALL) NOPASSWD:ALL" || fail "valid sudoers content must be written"
+    [ "$(cat "$target")" = "ops ALL=(ALL) NOPASSWD:ALL" ] || fail "sudoers content mismatch"
+    [ "$(stat -c %a "$target")" = 440 ] || fail "sudoers file must have mode 440"
+
+    # Invalid content over a valid file: the old file stays as it was, no temporary file is left.
+    assert_status 2 common_safe_write_sudoers "$target" "invalid sudoers syntax ??? !!!"
+    [ "$(cat "$target")" = "ops ALL=(ALL) NOPASSWD:ALL" ] || fail "invalid content must not replace the valid sudoers file"
+    [ "$(ls -A "$dir/sudoers.d")" = ops ] || fail "no temporary file may stay next to the sudoers file: $(ls -A "$dir/sudoers.d")"
+
+    # A write that cannot happen is a failure, and the old file stays.
+    if [ "$(id -u)" -ne 0 ]; then
+        chmod 555 "$dir/sudoers.d"
+        if common_safe_write_sudoers "$target" "root ALL=(ALL) NOPASSWD:ALL" 2>/dev/null; then
+            chmod 755 "$dir/sudoers.d"
+            fail "a failed write must not report success"
+        fi
+        chmod 755 "$dir/sudoers.d"
+        [ "$(cat "$target")" = "ops ALL=(ALL) NOPASSWD:ALL" ] || fail "a failed write must keep the old sudoers file"
+    else
+        printf 'SKIP: unwritable sudoers directory case: running as root\n'
+    fi
+
+    # A directory in place of the target is an error, not a file moved inside it.
+    mkdir "$dir/sudoers.d/dirtarget"
+    if common_safe_write_sudoers "$dir/sudoers.d/dirtarget" "ops ALL=(ALL) NOPASSWD:ALL" 2>/dev/null; then
+        fail "a directory in place of the sudoers file must not report success"
+    fi
+
+    # The unchecked copy is named with a dot: sudo skips such files in #includedir.
+    mkdir "$dir/bin"
+    # shellcheck disable=SC2016 # $2 belongs to the stub script, not to this shell.
+    printf '#!/bin/sh\nprintf "%%s\\n" "$2" >> "%s/visudo.log"\n' "$dir" > "$dir/bin/visudo"
+    chmod +x "$dir/bin/visudo"
+    PATH="$dir/bin:$PATH" common_safe_write_sudoers "$dir/sudoers.d/dotted" "ops ALL=(ALL) NOPASSWD:ALL" || \
+        fail "write with the stub visudo must succeed"
+    case "$(basename "$(head -n 1 "$dir/visudo.log")")" in
+        .dotted.*) ;;
+        *) fail "visudo must check a temporary file whose name starts with a dot: $(cat "$dir/visudo.log")" ;;
+    esac
+
+    rm -rf "$dir"
 }
 
 main() {

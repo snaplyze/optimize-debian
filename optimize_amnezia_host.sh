@@ -107,20 +107,31 @@ EOF
     common_safe_write_sudoers() {
         local target_file="${1:-}"
         local content="${2:-}"
+        local target_dir tmp_file visudo_bin
+
         [ -n "$target_file" ] && [ -n "$content" ] || return 1
-        mkdir -p "$(dirname "$target_file")"
-        printf '%s\n' "$content" > "$target_file"
-        chmod 440 "$target_file"
-        local visudo_bin
+
         visudo_bin="$(command -v visudo 2>/dev/null || true)"
         [ -n "$visudo_bin" ] || [ ! -x /usr/sbin/visudo ] || visudo_bin="/usr/sbin/visudo"
-        if [ -n "$visudo_bin" ] && [ -x "$visudo_bin" ]; then
-            if ! "$visudo_bin" -cf "$target_file" >/dev/null 2>&1; then
-                rm -f "$target_file"
-                return 2
-            fi
+        [ -n "$visudo_bin" ] && [ -x "$visudo_bin" ] || return 1
+
+        target_dir="$(dirname "$target_file")"
+        mkdir -p "$target_dir" || return 1
+        # sudo skips files whose names contain a dot, so the unchecked copy is never read as a rule.
+        tmp_file="$(mktemp "$target_dir/.$(basename "$target_file").XXXXXX" 2>/dev/null)" || return 1
+
+        if ! printf '%s\n' "$content" > "$tmp_file" || ! chmod 440 "$tmp_file"; then
+            rm -f "$tmp_file"
+            return 1
         fi
-        return 0
+        if ! "$visudo_bin" -cf "$tmp_file" >/dev/null 2>&1; then
+            rm -f "$tmp_file"
+            return 2
+        fi
+        if ! mv -fT "$tmp_file" "$target_file"; then
+            rm -f "$tmp_file"
+            return 1
+        fi
     }
 fi
 TARGET_USER=""
@@ -827,10 +838,16 @@ create_target_user_if_needed() {
 }
 
 ensure_passwordless_sudo() {
-    common_safe_write_sudoers "/etc/sudoers.d/${TARGET_USER}" "$TARGET_USER ALL=(ALL) NOPASSWD:ALL"
+    if ! common_safe_write_sudoers "/etc/sudoers.d/${TARGET_USER}" "$TARGET_USER ALL=(ALL) NOPASSWD:ALL"; then
+        error "Failed to configure passwordless sudo for ${TARGET_USER} (sudoers write or visudo check failed, is sudo installed?; the previous file, if any, is unchanged)"
+        exit 1
+    fi
     log "Passwordless sudo configured for ${TARGET_USER}"
 
-    common_safe_write_sudoers "/etc/sudoers.d/root" "root ALL=(ALL) NOPASSWD:ALL"
+    if ! common_safe_write_sudoers "/etc/sudoers.d/root" "root ALL=(ALL) NOPASSWD:ALL"; then
+        error "Failed to configure passwordless sudo for root (sudoers write or visudo check failed, is sudo installed?; the previous file, if any, is unchanged)"
+        exit 1
+    fi
     log "Passwordless sudo configured for root"
 }
 
