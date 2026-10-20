@@ -166,6 +166,200 @@ EOF
     }
 fi
 
+if ! declare -F common_apt_get >/dev/null; then
+    # apt-get without prompts. DPkg::Lock::Timeout makes apt wait for the dpkg lock held by
+    # another package manager instead of failing; apt does the waiting itself and covers the dpkg locks
+    # only (apt-get update takes the lists lock, see common_apt_update).
+    common_apt_get() {
+        DEBIAN_FRONTEND=noninteractive apt-get \
+            -o "DPkg::Lock::Timeout=${COMMON_APT_LOCK_TIMEOUT:-300}" \
+            -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 "$@"
+    }
+
+    # Refreshes the APT index once per run: later calls return 0 until common_apt_sources_changed.
+    # First waits for the dpkg lock with an install of no packages: apt-get update does not take
+    # that lock and would break the download of an installation running in another process.
+    # Returns 75 when that lock is still held after COMMON_APT_LOCK_TIMEOUT seconds.
+    # Retries while another process holds the lists lock, within COMMON_APT_UPDATE_ATTEMPTS
+    # attempts and COMMON_APT_LOCK_TIMEOUT seconds. COMMON_APT_UPDATE_CHECK may name a function
+    # that receives the apt output and returns non-zero to reject an update apt itself accepted.
+    common_apt_update() {
+        local context="${1:-package index refresh}"
+        local timeout="${COMMON_APT_LOCK_TIMEOUT:-300}"
+        local delay="${COMMON_APT_UPDATE_RETRY_DELAY:-10}"
+        local max_attempts="${COMMON_APT_UPDATE_ATTEMPTS:-30}"
+        local started="$SECONDS"
+        local attempt=1
+        local output status
+
+        if [ "${COMMON_APT_INDEX_FRESH:-0}" = 1 ]; then
+            return 0
+        fi
+
+        progress "Refreshing APT package index..."
+        status=0
+        output="$(LC_ALL=C common_apt_get install -y 2>&1)" || status=$?
+        if [ "$status" -ne 0 ]; then
+            log_silent "$output"
+            if grep -q 'Could not get lock' <<<"$output"; then
+                error "apt-get update failed during: $context (dpkg lock is still held)"
+                printf '%s\n' "$output" | head -n 10 | sed 's/^/    /' || true
+                return 75
+            fi
+        fi
+        while :; do
+            status=0
+            output="$(LC_ALL=C common_apt_get update 2>&1)" || status=$?
+            log_silent "$output"
+            if [ "$status" -eq 0 ] && [ -n "${COMMON_APT_UPDATE_CHECK:-}" ]; then
+                "$COMMON_APT_UPDATE_CHECK" "$output" || status=$?
+            fi
+            if [ "$status" -eq 0 ]; then
+                COMMON_APT_INDEX_FRESH=1
+                return 0
+            fi
+
+            if grep -Eq 'Could not get lock [^ ]*/lists/lock|Unable to lock directory [^ ]*/lists/' <<<"$output" \
+                && [ "$attempt" -lt "$max_attempts" ] \
+                && [ $((SECONDS - started + delay)) -le "$timeout" ]; then
+                if [ "$attempt" -eq 1 ]; then
+                    info "APT package lists are locked by another process, waiting for it..."
+                fi
+                sleep "$delay"
+                attempt=$((attempt + 1))
+                continue
+            fi
+
+            error "apt-get update failed during: $context"
+            printf '%s\n' "$output" | head -n 10 | sed 's/^/    /' || true
+            return "$status"
+        done
+    }
+
+    # Call after every change to APT sources or keys so the next common_apt_update refreshes the index.
+    common_apt_sources_changed() {
+        COMMON_APT_INDEX_FRESH=0
+    }
+
+    # common_package_available <package> [release]: the package has an install candidate or,
+    # when a release is named, a version in that release. `apt-cache -t <release> policy` is not
+    # enough: it only raises the release's priority and still shows the default candidate.
+    common_package_available() {
+        local package="${1:-}"
+        local release="${2:-}"
+        local policy candidate
+
+        [ -n "$package" ] || return 1
+        if [ -n "$release" ]; then
+            LC_ALL=C apt-cache madison "$package" 2>/dev/null | \
+                awk -F'|' -v suite=" ${release}/" 'index($3, suite) { found = 1 } END { exit !found }'
+            return
+        fi
+        policy="$(LC_ALL=C apt-cache policy "$package" 2>/dev/null)" || return 1
+        candidate="$(sed -n '/^[[:space:]]*Candidate:/{s/^[^:]*:[[:space:]]*//;p;q;}' <<<"$policy")"
+        [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
+    }
+
+    # common_package_installed_from <release> <package>...: every package is installed in a
+    # version that the release provides.
+    common_package_installed_from() {
+        local release="${1:-}"
+        local package version
+        shift || true
+
+        [ -n "$release" ] && [ $# -gt 0 ] || return 1
+        for package in "$@"; do
+            version="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null)" || return 1
+            [ -n "$version" ] || return 1
+            LC_ALL=C apt-cache madison "$package" 2>/dev/null | \
+                awk -F'|' -v suite=" ${release}/" -v version="$version" \
+                    'index($3, suite) { gsub(/[[:space:]]/, "", $2); if ($2 == version) found = 1 } END { exit !found }' || return 1
+        done
+    }
+
+    # common_safe_install [-t release] <package>...: installs the available packages in one
+    # apt-get call, retrying one by one when it fails. Unavailable packages only produce a
+    # warning; returns 1 when an available package could not be installed. With -t the
+    # packages come from that release and an installed package is upgraded to its version.
+    common_safe_install() {
+        local release=""
+        local packages=()
+        local available_packages=()
+        local unavailable_packages=()
+        local failed_packages=()
+        local install_args=(install -y)
+        local pkg output status
+
+        if [ "${1:-}" = "-t" ]; then
+            if [ -z "${2:-}" ]; then
+                error "common_safe_install: -t needs a release name"
+                return 1
+            fi
+            release="$2"
+            install_args+=(-t "$release")
+            shift 2
+        fi
+        packages=("$@")
+        [ ${#packages[@]} -gt 0 ] || return 0
+
+        status=0
+        common_apt_update "installing: ${packages[*]}" || status=$?
+        if [ "$status" -eq 75 ]; then
+            error "Not installing ${packages[*]}: another package manager still holds the dpkg lock"
+            return 1
+        elif [ "$status" -ne 0 ]; then
+            warn "Continuing with the existing APT package index"
+        fi
+
+        for pkg in "${packages[@]}"; do
+            if common_package_available "$pkg" "$release"; then
+                available_packages+=("$pkg")
+            else
+                unavailable_packages+=("$pkg")
+            fi
+        done
+
+        if [ ${#available_packages[@]} -gt 0 ]; then
+            progress "Installing ${#available_packages[@]} packages..."
+            status=0
+            output="$(LC_ALL=C common_apt_get "${install_args[@]}" "${available_packages[@]}" 2>&1)" || status=$?
+            log_silent "$output"
+            if [ "$status" -ne 0 ] && grep -q 'Could not get lock' <<<"$output"; then
+                # Retrying one by one would wait for the same lock once per package.
+                error "Not installing ${available_packages[*]}: another package manager still holds the dpkg lock"
+                failed_packages=("${available_packages[@]}")
+            elif [ "$status" -ne 0 ]; then
+                for pkg in "${available_packages[@]}"; do
+                    if [ ${#failed_packages[@]} -gt 0 ] && grep -q 'Could not get lock' <<<"$output"; then
+                        # The lock was taken meanwhile: the remaining packages would wait for it in turn.
+                        failed_packages+=("$pkg")
+                        continue
+                    fi
+                    status=0
+                    output="$(LC_ALL=C common_apt_get "${install_args[@]}" "$pkg" 2>&1)" || status=$?
+                    log_silent "$output"
+                    if [ "$status" -ne 0 ]; then
+                        failed_packages+=("$pkg")
+                        warn "Failed to install: $pkg"
+                        printf '%s\n' "$output" | tail -n 5 | sed 's/^/    /' || true
+                    fi
+                done
+            fi
+        fi
+
+        if [ ${#unavailable_packages[@]} -gt 0 ]; then
+            warn "Unavailable packages${release:+ in $release}: ${unavailable_packages[*]}"
+        fi
+        if [ ${#failed_packages[@]} -gt 0 ]; then
+            warn "Package installation incomplete: ${failed_packages[*]}"
+            return 1
+        fi
+        if [ ${#available_packages[@]} -gt 0 ]; then
+            log "Packages installed successfully${release:+ from $release}"
+        fi
+    }
+fi
+
 if ! declare -F tui_detect_backend >/dev/null; then
     : "${GUM:=/usr/local/bin/gum}"
     : "${TUI_GUM_VERSION:=0.17.0}"
@@ -363,6 +557,13 @@ SYMBOL_INFO="ℹ"
 LOG_FILE="/var/log/minipc_optimization.log"
 
 # Silent logging (to file only)
+# APT helper settings are fixed here: a root shell's environment must not change them.
+COMMON_APT_LOCK_TIMEOUT=300
+COMMON_APT_UPDATE_RETRY_DELAY=10
+COMMON_APT_UPDATE_ATTEMPTS=30
+COMMON_APT_UPDATE_CHECK=""
+COMMON_APT_INDEX_FRESH=0
+
 log_silent() {
     [ -n "${LOG_FILE:-}" ] || return 0
     local log_dir
@@ -540,93 +741,6 @@ if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" && $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# Wait for dpkg/apt lock to be released
-wait_for_dpkg_lock() {
-    local max_wait=300  # 5 minutes maximum wait
-    local wait_time=0
-    local check_interval=2
-
-    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
-          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-          fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
-
-        if [ $wait_time -ge $max_wait ]; then
-            error "Timeout waiting for dpkg lock after ${max_wait}s"
-            return 1
-        fi
-
-        if [ $wait_time -eq 0 ]; then
-            info "Waiting for other package managers to finish..."
-        fi
-
-        sleep $check_interval
-        wait_time=$((wait_time + check_interval))
-    done
-
-    # Additional small delay to ensure lock is fully released
-    [ $wait_time -gt 0 ] && sleep 1
-    return 0
-}
-
-# Check if package is available in repositories
-package_available() {
-    LC_ALL=C apt-cache policy "$1" 2>/dev/null | grep -q "Candidate:" && \
-    ! LC_ALL=C apt-cache policy "$1" 2>/dev/null | grep -q "Candidate: (none)"
-}
-
-run_apt_update_with_diagnostics() {
-    local context="$1"
-    local output
-    local status
-
-    output=$(apt-get update 2>&1) && status=0 || status=$?
-    log_silent "$output"
-
-    if [ $status -ne 0 ]; then
-        error "apt-get update failed during: $context"
-        printf '%s\n' "$output" | head -10 | sed 's/^/    /'
-        return $status
-    fi
-
-    return 0
-}
-
-# Safe package installation with availability check (silent mode)
-safe_install() {
-    local packages=("$@")
-    local available_packages=()
-    local unavailable_packages=()
-
-    # Wait for any running package managers to finish
-    wait_for_dpkg_lock || return 1
-
-    # Update package list silently
-    apt-get update >/dev/null 2>&1 || true
-
-    for pkg in "${packages[@]}"; do
-        if package_available "$pkg"; then
-            available_packages+=("$pkg")
-        else
-            unavailable_packages+=("$pkg")
-        fi
-    done
-    
-    if [ ${#available_packages[@]} -gt 0 ]; then
-        progress "Installing ${#available_packages[@]} packages..."
-        if ! apt-get install -y "${available_packages[@]}" >/dev/null 2>&1; then
-            # Retry with individual packages on failure
-            for pkg in "${available_packages[@]}"; do
-                apt-get install -y "$pkg" >/dev/null 2>&1 || warn "Failed to install: $pkg"
-            done
-        fi
-        log "Packages installed successfully"
-    fi
-    
-    if [ ${#unavailable_packages[@]} -gt 0 ]; then
-        warn "Unavailable packages: ${unavailable_packages[*]}"
-    fi
-}
-
 is_supported_debian_version() {
     common_is_supported_debian_version "${1:-}"
 }
@@ -753,13 +867,16 @@ ensure_time_sync_service() {
 
     service=$(detect_time_sync_service || true)
     if [ -z "$service" ]; then
-        if ! package_available systemd-timesyncd; then
+        if ! common_package_available systemd-timesyncd; then
             warn "No supported NTP service detected and systemd-timesyncd is unavailable"
             return 1
         fi
 
         log "No NTP service detected. Installing systemd-timesyncd..."
-        safe_install systemd-timesyncd
+        if ! common_safe_install systemd-timesyncd; then
+            warn "Failed to install systemd-timesyncd"
+            return 1
+        fi
         service="systemd-timesyncd.service"
     else
         log "Detected NTP service: ${service%.service}"
@@ -823,9 +940,9 @@ resolve_intel_media_packages() {
         "mesa-utils"
     )
 
-    if package_available "libmfx-gen1.2"; then
+    if common_package_available "libmfx-gen1.2"; then
         packages+=("libmfx-gen1.2")
-    elif package_available "libmfx1"; then
+    elif common_package_available "libmfx1"; then
         packages+=("libmfx1")
     fi
 
@@ -989,19 +1106,21 @@ if $UPDATE_SYSTEM; then
     # Enrich sources for non-free drivers (needed for Intel GPU)
     log "Enabling contrib non-free non-free-firmware repositories..."
     enrich_all_apt_sources
-    
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+    common_apt_sources_changed
+
+    common_apt_update "system update"
+    common_apt_get upgrade -y
     
     if $INSTALL_BASE_UTILS; then
         log "Installing essential packages..."
         # Combined list from VPS + specific needs
-        safe_install wget curl git htop iotop sysstat net-tools \
+        common_safe_install wget curl git htop iotop sysstat net-tools \
             iptables ufw fail2ban python3-systemd unattended-upgrades apt-listchanges \
             zip unzip gnupg ca-certificates lsb-release \
             lm-sensors linux-cpupower speedtest-cli irqbalance \
             fzf ripgrep fd-find bat bc needrestart ncdu tree vim nano tmux \
-            make gcc g++ cmake xz-utils xdg-user-dirs
+            make gcc g++ cmake xz-utils xdg-user-dirs || \
+            warn "Some essential packages were not installed, continuing"
             
         # Aliases for bat and fd
         if [ -f /usr/bin/batcat ] && [ ! -f /usr/bin/bat ]; then
@@ -1058,7 +1177,7 @@ if $CONFIGURE_LOCALES; then
     esac
 
     # Support both SSH client locales regardless of the selected default language.
-    safe_install locales
+    common_safe_install locales || warn "locales package was not installed, locale generation may fail"
     common_generate_utf8_locales /etc/locale.gen
     # Debian 12 uses /etc/default/locale; Debian 13 uses /etc/locale.conf.
     update-locale --reset "LANG=$DEFAULT_LOCALE" "LANGUAGE=${DEFAULT_LOCALE%%.*}"
@@ -1270,7 +1389,11 @@ if $INSTALL_KERNEL; then
     log "Detected CPU: $CPU_MODEL"
     
     # Remove legacy XanMod sources and keys if present
-    rm -f /etc/apt/sources.list.d/xanmod-release.list /usr/share/keyrings/xanmod-archive-keyring.gpg 2>/dev/null || true
+    if [ -e /etc/apt/sources.list.d/xanmod-release.list ]; then
+        rm -f /etc/apt/sources.list.d/xanmod-release.list
+        common_apt_sources_changed
+    fi
+    rm -f /usr/share/keyrings/xanmod-archive-keyring.gpg 2>/dev/null || true
 
     distro_version="${VERSION_ID%%.*}"
     ARCH="$(dpkg --print-architecture)"
@@ -1281,22 +1404,31 @@ if $INSTALL_KERNEL; then
         info "Configuring Debian bookworm-backports for latest LTS kernel..."
         common_render_debian_backports_source "bookworm" > /etc/apt/sources.list.d/debian-backports.sources
         chmod 644 /etc/apt/sources.list.d/debian-backports.sources
+        common_apt_sources_changed
 
-        run_apt_update_with_diagnostics "Backports repository refresh"
         log "Installing official Debian Backports kernel ($KERNEL_PKG, $HEADERS_PKG)..."
-        safe_install -t bookworm-backports "$KERNEL_PKG" "$HEADERS_PKG"
-        log "Official Debian Backports kernel ($KERNEL_PKG, $HEADERS_PKG) installed successfully"
-        BACKPORTS_KERNEL_INSTALLED=true
+        if common_apt_update "Backports repository refresh" \
+            && common_safe_install -t bookworm-backports "$KERNEL_PKG" "$HEADERS_PKG" \
+            && common_package_installed_from bookworm-backports "$KERNEL_PKG" "$HEADERS_PKG"; then
+            log "Official Debian Backports kernel ($KERNEL_PKG, $HEADERS_PKG) installed successfully"
+            BACKPORTS_KERNEL_INSTALLED=true
+        else
+            warn "Debian Backports kernel ($KERNEL_PKG, $HEADERS_PKG) was not installed, the current kernel stays in use"
+            BACKPORTS_KERNEL_INSTALLED=false
+        fi
     else
         info "Debian $distro_version includes modern kernel by default ($KERNEL_VERSION)"
-        safe_install "$KERNEL_PKG" "$HEADERS_PKG"
-        log "Official Debian kernel ($KERNEL_PKG, $HEADERS_PKG) updated successfully"
+        if common_safe_install "$KERNEL_PKG" "$HEADERS_PKG"; then
+            log "Official Debian kernel ($KERNEL_PKG, $HEADERS_PKG) updated successfully"
+        else
+            warn "Official Debian kernel ($KERNEL_PKG, $HEADERS_PKG) was not updated"
+        fi
         BACKPORTS_KERNEL_INSTALLED=false
     fi
     
     # CPU Governor (schedutil is best for N5095)
     # linux-cpupower is available on Debian 12 and Debian 13
-    safe_install linux-cpupower
+    common_safe_install linux-cpupower || warn "linux-cpupower was not installed, CPU governor tuning may be skipped"
 
     # Detect best available governor
     AVAILABLE_GOVERNORS=$(cpupower frequency-info -g 2>/dev/null | grep "available cpufreq governors:" | cut -d: -f2 || true)
@@ -1337,9 +1469,8 @@ fi
 
 if $INSTALL_INTEL_GPU; then
     log "Installing Intel GPU Drivers..."
-    apt-get update >/dev/null 2>&1 || true
     mapfile -t intel_gpu_packages < <(resolve_intel_media_packages)
-    safe_install "${intel_gpu_packages[@]}"
+    common_safe_install "${intel_gpu_packages[@]}" || warn "Intel GPU drivers were not fully installed"
     
     /usr/sbin/groupadd -f render
     /usr/sbin/groupadd -f video
@@ -1386,11 +1517,11 @@ fi
 ################################################################################
 if $INSTALL_FISH; then
         section "${SYMBOL_ROCKET} Fish & Starship"
-        safe_install fish curl git
+        common_safe_install fish curl git || warn "Fish shell prerequisites were not fully installed"
 
         if ! command -v starship >/dev/null 2>&1; then
-            if package_available starship; then
-                safe_install starship
+            if common_package_available starship; then
+                common_safe_install starship || warn "Starship package installation failed, trying the official installer"
             fi
             if ! command -v starship >/dev/null 2>&1; then
                 curl -fsSL https://starship.rs/install.sh | sh -s -- -y >/dev/null 2>&1 || true
@@ -1536,7 +1667,7 @@ section "${SYMBOL_GEAR} Bash Modernization"
 progress "Configuring modern Bash setup..."
 
 # Ensure bash-completion is installed
-safe_install bash-completion
+common_safe_install bash-completion || warn "bash-completion was not installed"
 
 # Function to setup modern Bash for a user
 setup_bash_for_user() {
@@ -1892,7 +2023,7 @@ if $INSTALL_NODE; then
         fi
 
         warn "Missing fnm prerequisites: ${missing_packages[*]}. Attempting to install them..."
-        safe_install "${missing_packages[@]}"
+        common_safe_install "${missing_packages[@]}" || true
 
         for pkg in "${missing_packages[@]}"; do
             command -v "$pkg" >/dev/null 2>&1 || unresolved_packages+=("$pkg")
@@ -2003,7 +2134,7 @@ fi
 if $INSTALL_DOCKER; then
     section "Step 8: Docker"
     for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
-        apt-get remove -y $pkg 2>/dev/null || true
+        common_apt_get remove -y "$pkg" 2>/dev/null || true
     done
     
     install -m 0755 -d /etc/apt/keyrings
@@ -2012,9 +2143,11 @@ if $INSTALL_DOCKER; then
     DOCKER_ARCH="$(dpkg --print-architecture)"
     
     common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "/etc/apt/keyrings/docker.gpg" > /etc/apt/sources.list.d/docker.sources
-      
-    apt-get update
-    safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    common_apt_sources_changed
+
+    common_apt_update "Docker repository refresh"
+    common_safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || \
+        warn "Some Docker packages were not installed"
 
     # Check if Docker was actually installed
     if ! command -v docker &>/dev/null; then
@@ -2322,7 +2455,10 @@ if $INSTALL_SAMBA; then
         chown -R "$NEW_USER:$NEW_USER" /mnt/ssd
         chmod -R 755 /mnt/ssd
         
-        safe_install samba
+        common_safe_install samba || {
+            error "Samba installation failed"
+            exit 1
+        }
         
         # Backup config
         [ ! -f /etc/samba/smb.conf.bak ] && cp /etc/samba/smb.conf /etc/samba/smb.conf.bak
@@ -2422,7 +2558,7 @@ echo "Starting Mini PC cleanup..."
 # Clean package cache
 apt-get clean
 apt-get autoclean
-apt-get autoremove -y
+apt-get -o DPkg::Lock::Timeout=300 autoremove -y
 # Clean journals > 7 days
 journalctl --vacuum-time=7d
 # Clean docker
@@ -2463,7 +2599,7 @@ cat > /usr/local/bin/network-test.sh <<'EOF'
 #!/bin/bash
 echo "=== Network Performance Test ==="
 if ! command -v speedtest-cli &> /dev/null; then
-    apt-get install -y speedtest-cli
+    apt-get install -y -o DPkg::Lock::Timeout=300 speedtest-cli
 fi
 speedtest-cli
 echo ""

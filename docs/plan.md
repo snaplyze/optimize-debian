@@ -41,15 +41,15 @@
 | 6 | [DATA-3](#data-3) | P2 | Upgrade: при сбое `sshd -T` ожидается порт 22 | — | DONE | #9 |
 | 7 | [DATA-2](#data-2) | P2 | Upgrade: бэкап не проверяется, нет пути восстановления | — | DONE | #10 |
 | 8 | [DATA-1](#data-1) | P2 | Upgrade: официальные источники старого релиза остаются | — | DONE | #11 |
-| 9 | [ARCH-1](#arch-1) | P2 | `safe_install` в мини-ПК и WSL2 сообщает успех при сбое | ARCH-2 | TODO | #13 |
-| 10 | [BUG-2](#bug-2) | P2 | Ядро из Debian Backports не ставится | ARCH-1, BUG-1 | TODO | #38 |
-| 11 | [PERF-2](#perf-2) | P2 | Ожидание блокировки dpkg зависит от `fuser` | ARCH-1 | TODO | #14 |
+| 9 | [ARCH-1](#arch-1) | P2 | `safe_install` в мини-ПК и WSL2 сообщает успех при сбое | ARCH-2 | DONE | #13 |
+| 10 | [BUG-2](#bug-2) | P2 | Ядро из Debian Backports не ставится | ARCH-1, BUG-1 | DONE | #38 |
+| 11 | [PERF-2](#perf-2) | P2 | Ожидание блокировки dpkg зависит от `fuser` | ARCH-1 | DONE | #14 |
 | 12 | [ARCH-6](#arch-6) | P2 | Хелперы вне `lib/` разошлись: `enrich_apt_components` и time-sync | ARCH-2 | TODO | #35 |
 | 13 | [SEC-1](#sec-1) | P2 | Сторонние инструменты ставятся без проверки целостности | — | TODO | #15 |
 | 14 | [DEL-1](#del-1) | P2 | VPS, мини-ПК и WSL2 исполняются по мере загрузки | — | TODO | #16 |
 | 15 | [TEST-1](#test-1) | P2 | Рискованные пути без поведенческих тестов | — | IN_PROGRESS | #17 |
 | 16 | [SEC-2](#sec-2) | P3 | Небезопасные временные файлы при установке инструментов | SEC-1 | TODO | #18 |
-| 17 | [PERF-1](#perf-1) | P3 | Индекс APT обновляется на каждый `safe_install` | ARCH-1, BUG-1 | TODO | #19 |
+| 17 | [PERF-1](#perf-1) | P3 | Индекс APT обновляется на каждый `safe_install` | ARCH-1, BUG-1 | DONE | #19 |
 | 18 | [PERF-3](#perf-3) | P3 | Загрузки без таймаутов и повторов | SEC-1 | TODO | #20 |
 | 19 | [DATA-4](#data-4) | P3 | Upgrade: санитизация deb822 меняет права файла | — | DONE | #21 |
 | 20 | [DATA-5](#data-5) | P3 | Повторный запуск накапливает и перезаписывает конфигурацию | — | TODO | #22 |
@@ -176,7 +176,7 @@
 - Границы: `lib/common.sh`, `safe_install` и его вызовы в четырех `optimize_*.sh`, `tests/`.
 - Результат: одна реализация `safe_install`; сбой установки виден и останавливает зависимый шаг.
 - Приемка: тест `safe_install` в `lib/` — при сбое установки код 1 и нет сообщения об успехе; копии совпадают с `lib/` (тест ARCH-2).
-- Ход: следующий шаг — тест `safe_install` (сейчас мини-ПК и WSL2 его не проходят).
+- Ход: выполнено — одна реализация `common_safe_install [-t выпуск] <пакеты>` в `lib/common.sh` с копиями во всех скриптах: доступные пакеты ставятся одним вызовом, при сбое — по одному; любой сбой → код 1 без сообщения об успехе; недоступные — предупреждение. Прежние `safe_install` и `package_available` четырех скриптов удалены, вызовы переименованы. Проверка: `tests/test_apt_helpers.sh` (сбой → 1 без «installed successfully», недоступные, повтор по одному), копии — `tests/test_embedded_copies.sh`, который теперь также требует, чтобы каждая вызываемая в скрипте функция `common_*`/`tui_*` была определена в его копии без `lib/`; мутации — FAIL.
 
 #### BUG-2
 
@@ -188,7 +188,7 @@
 - Границы: общий `safe_install` в `lib/` после ARCH-1, три вызова, `tests/`; на мини-ПК проверка на Debian 12 возможна только после BUG-1 — обрыв на `optimize_mini_pc.sh:1257` идет раньше вызова на `:1259`.
 - Результат: на Debian 12 устанавливается ядро из `bookworm-backports`.
 - Приемка: тест с моком `apt-get`, записывающим аргументы, — `safe_install -t bookworm-backports linux-image-amd64` вызывает `apt-get install` с `-t bookworm-backports` и не называет `-t` и `bookworm-backports` недоступными пакетами; на одноразовой Debian 12 после запуска `apt-cache policy linux-image-amd64` показывает установленную версию из `bookworm-backports`.
-- Ход: следующий шаг — после ARCH-1 тест с моком `apt-get`.
+- Ход: выполнено — `common_safe_install -t <выпуск>` проверяет, что пакет есть именно в выпуске (`apt-cache madison`: `apt-cache -t <выпуск> policy` лишь поднимает приоритет и показывает кандидата из основного выпуска), и ставит через `apt-get install -t <выпуск>`; `-t` и имя выпуска не считаются пакетами; сообщение об успехе ядра — только если установленная версия есть в `bookworm-backports` (`common_package_installed_from`), иначе ошибка (в VPS и amnezia — остановка, в мини-ПК — предупреждение). Проверка: тест `-t` в `tests/test_apt_helpers.sh`; на Debian 12 (контейнер `debian:12`, ветка ядра мини-ПК): до — `linux-image-amd64` 6.1.190-1 из `bookworm` и предупреждение `Unavailable packages: -t bookworm-backports`, после — 6.12.95-1~bpo12+1 из `bookworm-backports`, «Packages installed successfully from bookworm-backports».
 
 #### PERF-2
 
@@ -200,7 +200,7 @@
 - Границы: общий APT-хелпер в `lib/` после ARCH-1, копии в четырех `optimize_*.sh`, `tests/`.
 - Результат: установка ждет освобождения блокировки без внешних утилит.
 - Приемка: тест с `PATH` без `fuser` и моком `apt-get`, который сначала сообщает о занятой блокировке, — установка дожидается и завершается; на одноразовой Debian — прогон при запущенном `apt-get`.
-- Ход: следующий шаг — проверить Г-5 на свежем образе.
+- Ход: выполнено — `wait_for_dpkg_lock` и зависимость от `fuser` удалены; установки идут через `common_apt_get` с `-o DPkg::Lock::Timeout=300`; `common_apt_update` перед `apt-get update` ждет блокировку dpkg «пустым» `apt-get install` (сам `apt-get update` эту блокировку не берет) и повторяет обновление при занятой блокировке списков в пределах лимита. Проверка: тесты ожидания и повтора в `tests/test_apt_helpers.sh` (в том числе при `PATH` без `fuser`); на Debian 12 (в образе `debian:12` нет `fuser`) установка, пока другой `apt-get install build-essential` держит блокировку: до — установка упала, а `apt-get update` из старого `safe_install` сломал и фоновую установку (`rename failed` в `archives/partial`), после — установка дождалась блокировки, обе завершились с кодом 0. После ревью: при зависшей блокировке установка не повторяется по одному пакету (иначе ожидание в 300 с умножалось бы на число пакетов), `common_apt_update` возвращает 75 и `common_safe_install` сразу завершается с ошибкой; сообщение о блокировке распознается с `LC_ALL=C` при любой локали (тесты с переведенным сообщением apt).
 
 #### ARCH-6
 
@@ -273,7 +273,7 @@
 - Границы: `lib/common.sh`; `package_available`, `run_apt_update_with_diagnostics`, `apt_update_once` и вызовы обновления индекса в четырех `optimize_*.sh`; `tests/`.
 - Результат: одно обновление индекса на прогон плюс одно после каждого изменения источников; `package_available` и обновление индекса — одной реализацией.
 - Приемка: тест с моком `apt-get` считает вызовы `update`; `package_available` и обновление индекса определены в `lib/`, копии совпадают с `lib/` (тест ARCH-2); замер до и после по способу выше.
-- Ход: следующий шаг — после ARCH-1 тест-счетчик вызовов `apt-get update`.
+- Ход: выполнено — `common_apt_update` обновляет индекс один раз за прогон, `common_apt_sources_changed` сбрасывает отметку после каждого изменения источников или ключей; `common_package_available` — один вызов `apt-cache policy`; разошедшиеся `package_available`, `run_apt_update_with_diagnostics`, `apt_update_once` удалены (WSL-проверка ошибок верификации и подсказка про часы — через `COMMON_APT_UPDATE_CHECK`). Настройки `COMMON_APT_*` в скриптах присваиваются безусловно, окружение их не меняет (тест `test_apt_settings_ignore_environment`). Проверка: счетчик в `tests/test_apt_helpers.sh` — одно обновление на 13 установок и повторное только после сброса; замер на Debian 12 (свежий контейнер `debian:12` на каждый прогон, 13 вызовов установки небольших пакетов из VPS-скрипта, без конкурирующей нагрузки): до — 13 вызовов `apt-get update`, 27,5 / 27,8 / 28,2 с; после — 1 вызов, 18,0 / 18,2 / 19,4 с. Цель по времени владельцем не задана.
 
 #### PERF-3
 
@@ -451,9 +451,9 @@
 
 - Г-1. VPS и мини-ПК ставят пакеты без `DEBIAN_FRONTEND=noninteractive` (его задают только для `apt-get upgrade`: `optimize_vps.sh:1880`, `optimize_mini_pc.sh:966`; WSL2 экспортирует глобально, `optimize_wsl2.sh:17`), а вывод `apt-get install` уходит в `/dev/null` — вопрос debconf может повесить шаг невидимо. Проверка: установка списков пакетов скриптов в чистом контейнере Debian с `DEBIAN_PRIORITY=high` без `DEBIAN_FRONTEND`, затем `debconf-show` для установленных пакетов.
 - Г-2. Разные контракты time-sync (ARCH-6): `SystemClockSynchronized` против `NTPSynchronized` и код 1 без systemd в VPS и мини-ПК — под `set -e` может остановить скрипт. Проверка: `timedatectl show -p SystemClockSynchronized -p NTPSynchronized` и запуск без `systemd-timesyncd`.
-- Г-3. Лишние `apt-get update` (PERF-1) стоят десятки секунд или минуты на прогон. Проверка: способ замера из PERF-1.
+- Г-3. Подтверждено замером PERF-1 на Debian 12: 13 лишних `apt-get update` стоили около 9 с на 13 небольших установок; на полном прогоне VPS, вероятно, больше — полный прогон не замерялся.
 - Г-4. Действующий `nofile` на VPS — 65535: pam_limits читает `limits.d` после `limits.conf` (man pam_limits, Debian bookworm), а по коду pam_limits последняя запись того же уровня побеждает. Проверка: `ulimit -n` после входа.
-- Г-5. В облачных образах Debian 12/13 нет `fuser` (PERF-2). Проверка: `command -v fuser` на свежих образах.
+- Г-5. В официальном образе `debian:12` `fuser` нет (`psmisc` — `Priority: optional`); облачные образы не проверены. После PERF-2 скрипты от `fuser` не зависят, гипотеза больше ни на что не влияет.
 - Г-6. Samba в Debian 12/13 по умолчанию разрешает только NTLMv2 (DOC-1). Проверка: `testparm -sv 2>/dev/null | grep 'ntlm auth'`.
 - Г-7. На CI-раннере `fedora-mini-s` есть `fish`, иначе проверка fish-шаблонов в CI молча пропускается (TEST-3). Проверка: `command -v fish` под пользователем раннера.
 - Г-8. Повторный запуск VPS на машине с 1 ГБ RAM и занятой подкачкой: `swapoff /swapfile` (`optimize_vps.sh:2302-2306`) может завершиться ошибкой и остановить скрипт по `set -e`. Проверка: VM с 1 ГБ RAM под нагрузкой.

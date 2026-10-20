@@ -292,27 +292,98 @@ test_repository_text_contracts() {
     fi
 }
 
-test_vps_safe_install_reports_install_failures() {
+test_apt_settings_ignore_environment() {
+    local script
+    # The scripts run as root through `bash <(curl ...)`, which keeps the caller's environment:
+    # COMMON_APT_UPDATE_CHECK names a command to run, so none of these may come from it.
+    for script in optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh optimize_amnezia_host.sh; do
+        SCRIPT_ROOT="$ROOT_DIR" SCRIPT_NAME="$script" COMMON_APT_UPDATE_CHECK=/bin/false \
+            COMMON_APT_LOCK_TIMEOUT=1 COMMON_APT_UPDATE_ATTEMPTS=1 COMMON_APT_UPDATE_RETRY_DELAY=0 \
+            COMMON_APT_INDEX_FRESH=1 bash -c '
+            set -euo pipefail
+            OPTIMIZE_SOURCE_ONLY=1
+            source "$SCRIPT_ROOT/$SCRIPT_NAME"
+            [ "$COMMON_APT_LOCK_TIMEOUT" = 300 ] && [ "$COMMON_APT_UPDATE_ATTEMPTS" = 30 ] \
+                && [ "$COMMON_APT_UPDATE_RETRY_DELAY" = 10 ] && [ "$COMMON_APT_INDEX_FRESH" = 0 ] || {
+                printf "FAIL: %s takes APT settings from the environment\n" "$SCRIPT_NAME" >&2
+                exit 1
+            }
+            case "$SCRIPT_NAME:$COMMON_APT_UPDATE_CHECK" in
+                optimize_wsl2.sh:wsl_apt_update_check|optimize_vps.sh:|optimize_mini_pc.sh:|optimize_amnezia_host.sh:) ;;
+                *) printf "FAIL: %s: COMMON_APT_UPDATE_CHECK=%s\n" "$SCRIPT_NAME" "$COMMON_APT_UPDATE_CHECK" >&2; exit 1 ;;
+            esac
+        '
+    done
+}
+
+test_apt_helpers_replace_old_implementations() {
+    local script
+    # The APT helpers live in lib/common.sh (tests/test_apt_helpers.sh) and are embedded in
+    # every script (tests/test_embedded_copies.sh); no script keeps its own variant.
+    for script in optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh optimize_amnezia_host.sh; do
+        if grep -nE 'fuser|wait_for_dpkg_lock|run_apt_update_with_diagnostics|apt_update_once|(^|[^_a-z])(safe_install|package_available)\b' "$ROOT_DIR/$script"; then
+            fail "$script must use the common_apt_* / common_safe_install helpers only"
+        fi
+    done
+}
+
+test_apt_source_changes_reset_the_index_mark() {
+    local script bad
+    # A text check (hygiene): common_apt_update refreshes the index once per run, so after the
+    # script changes APT sources or keys, common_apt_sources_changed must come before the next
+    # refresh or installation, or the new repository stays invisible.
+    for script in optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh optimize_amnezia_host.sh; do
+        bad="$(awk '
+            # Bodies of the enrich_* helpers are the changes themselves; their callers are checked.
+            /^[[:space:]]*enrich_[a-z0-9_]*\(\) \{/ { skip = 1; next }
+            skip && /^[[:space:]]*\}$/ { skip = 0; next }
+            skip || /^[[:space:]]*#/ { next }
+            /common_apt_sources_changed/ { pending = 0; next }
+            /(>|tee) .*(docker\.sources|debian-backports\.sources|nvidia-container-toolkit\.list|\$DOCKER_SOURCES_FILE|\$BACKPORTS_SOURCES_FILE)/ ||
+            /^[[:space:]]*enrich_all_apt_sources[^(]*$/ ||
+            /^[[:space:]]*(enrich_apt_components|enrich_deb822_components) / ||
+            /sed -i.*(sources\.list|Components:)/ ||
+            /add-apt-repository / ||
+            /dpkg -i .*keyring/ ||
+            /rm -f[^#]*\/etc\/apt\/sources\.list\.d\// { if (!pending) pending = NR; next }
+            pending && /(common_safe_install|common_apt_update|common_apt_get (install|upgrade|dist-upgrade|full-upgrade))[[:space:]]/ {
+                print pending; pending = 0
+            }
+            END { if (pending) print pending }
+        ' "$ROOT_DIR/$script")"
+        [ -z "$bad" ] || fail "$script: APT sources change at line(s) $(tr '\n' ' ' <<<"$bad")not followed by common_apt_sources_changed before the next refresh or install"
+    done
+}
+
+test_wsl_apt_update_check() {
     SCRIPT_ROOT="$ROOT_DIR" bash -c '
         set -euo pipefail
         OPTIMIZE_SOURCE_ONLY=1
-        source "$SCRIPT_ROOT/optimize_vps.sh"
-        wait_for_dpkg_lock() { return 0; }
-        package_available() { return 0; }
-        progress() { :; }
-        log() { :; }
-        warn() { :; }
-        apt-get() {
-            case "$1" in
-                update) return 0 ;;
-                install) return 1 ;;
-                *) return 0 ;;
-            esac
+        source "$SCRIPT_ROOT/optimize_wsl2.sh"
+        test_tmp="$(mktemp -d)"
+        trap "rm -rf \"$test_tmp\"" EXIT
+        warn() { printf "WARN: %s\n" "$1" >> "$test_tmp/warn.txt"; }
+
+        [[ "${COMMON_APT_UPDATE_CHECK:-}" == "wsl_apt_update_check" ]] || {
+            printf "FAIL: WSL2 must register wsl_apt_update_check for common_apt_update\n" >&2
+            exit 1
         }
-        if safe_install synthetic-package; then
-            printf "FAIL: safe_install must fail when package installation fails\n" >&2
+        wsl_apt_update_check "Hit:1 http://deb.debian.org/debian bookworm InRelease"
+        [ ! -s "$test_tmp/warn.txt" ]
+
+        if wsl_apt_update_check "W: Failed to fetch http://example.invalid/Release"; then
+            printf "FAIL: a fetch failure must reject the APT refresh\n" >&2
             exit 1
         fi
+        grep -q "repository verification errors" "$test_tmp/warn.txt"
+        ! grep -q "WSL clock" "$test_tmp/warn.txt"
+
+        : > "$test_tmp/warn.txt"
+        if wsl_apt_update_check "W: GPG error: Signature made in the future, not live until Mon"; then
+            printf "FAIL: a signature date error must reject the APT refresh\n" >&2
+            exit 1
+        fi
+        grep -q "WSL clock appears out of sync" "$test_tmp/warn.txt"
     '
 }
 
@@ -333,8 +404,8 @@ test_vps_ntp_and_apt_helpers() {
 
         systemd_system_available() { return 0; }
         service_unit_exists() { return 1; }
-        package_available() { [ "$1" = "systemd-timesyncd" ]; }
-        safe_install() { printf "%s\n" "$*" > "$test_tmp/ntp-install.txt"; }
+        common_package_available() { [ "$1" = "systemd-timesyncd" ]; }
+        common_safe_install() { printf "%s\n" "$*" > "$test_tmp/ntp-install.txt"; }
         service_unit_active() { return 1; }
         service_unit_enable_now() { return 0; }
         service_unit_start() { return 0; }
@@ -366,41 +437,6 @@ test_vps_ntp_and_apt_helpers() {
         grep -q "main non-free-firmware contrib non-free" "$tmp_file"
         rm -f "$tmp_file"
     '
-}
-
-test_apt_update_diagnostics() {
-    local script
-    # Users run the scripts as `bash <(curl ...)`, without lib/: check the copy alone.
-    for script in optimize_vps.sh optimize_mini_pc.sh; do
-        SCRIPT_ROOT="$ROOT_DIR" SCRIPT_NAME="$script" bash -c '
-            set -euo pipefail
-            test_tmp="$(mktemp -d)"
-            trap "rm -rf \"$test_tmp\"" EXIT
-            cp "$SCRIPT_ROOT/$SCRIPT_NAME" "$test_tmp/$SCRIPT_NAME"
-            OPTIMIZE_SOURCE_ONLY=1
-            source "$test_tmp/$SCRIPT_NAME"
-            declare -F run_apt_update_with_diagnostics >/dev/null || {
-                printf "FAIL: %s must define run_apt_update_with_diagnostics\n" "$SCRIPT_NAME" >&2
-                exit 1
-            }
-            log_silent() { :; }
-            error() { printf "ERROR: %s\n" "$1"; }
-
-            apt-get() { return 0; }
-            run_apt_update_with_diagnostics "test refresh" > "$test_tmp/apt-ok.txt" 2>&1
-
-            apt-get() {
-                printf "%s\n" "E: synthetic apt failure"
-                return 1
-            }
-            if run_apt_update_with_diagnostics "test refresh" > "$test_tmp/apt-diag.txt" 2>&1; then
-                printf "FAIL: %s: expected apt update helper to fail\n" "$SCRIPT_NAME" >&2
-                exit 1
-            fi
-            grep -q "apt-get update failed during: test refresh" "$test_tmp/apt-diag.txt"
-            grep -q "synthetic apt failure" "$test_tmp/apt-diag.txt"
-        '
-    done
 }
 
 test_vps_enrichment_rewrite_failure_is_diagnostic() {
@@ -437,12 +473,12 @@ test_mini_ntp_helper() {
         log_silent() { :; }
 
         systemd_system_available() { return 0; }
-        package_available() { [ "$1" = "systemd-timesyncd" ]; }
+        common_package_available() { [ "$1" = "systemd-timesyncd" ]; }
         service_unit_exists() { return 1; }
         service_unit_active() { return 1; }
         service_unit_enable_now() { return 0; }
         service_unit_start() { return 0; }
-        safe_install() { :; }
+        common_safe_install() { :; }
         TIME_SYNC_SERVICE_NAME="Not configured"
         ensure_time_sync_service
         [[ "$TIME_SYNC_SERVICE_NAME" == "systemd-timesyncd" ]]
@@ -457,9 +493,11 @@ main() {
     test_script_text_contracts
     test_generated_fish_config_templates_parse
     test_repository_text_contracts
-    test_vps_safe_install_reports_install_failures
+    test_apt_settings_ignore_environment
+    test_apt_helpers_replace_old_implementations
+    test_apt_source_changes_reset_the_index_mark
+    test_wsl_apt_update_check
     test_vps_ntp_and_apt_helpers
-    test_apt_update_diagnostics
     test_vps_enrichment_rewrite_failure_is_diagnostic
     test_mini_ntp_helper
     printf 'tests/test_optimize_distro_support.sh: OK\n'

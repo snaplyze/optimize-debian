@@ -40,8 +40,20 @@ dump_functions() {
     ' _ "$out_dir" "$names_file" "$@" </dev/null >/dev/null
 }
 
+# Prints each name from $2 that the standalone script $1 leaves undefined once sourced.
+undefined_functions() {
+    local script="$1" names_file="$2"
+    env -i PATH="$PATH" HOME="$TEST_DIR" OPTIMIZE_SOURCE_ONLY=1 bash -c '
+        # shellcheck disable=SC1090
+        source "$1"
+        while IFS= read -r fn; do
+            declare -F "$fn" >/dev/null || printf "%s\n" "$fn"
+        done < "$2"
+    ' _ "$script" "$names_file" </dev/null 2>/dev/null
+}
+
 main() {
-    local script fn copies total=0 lib
+    local script fn copies total=0 lib undefined
     local lib_paths=()
 
     for lib in "${LIBS[@]}"; do
@@ -77,6 +89,12 @@ main() {
         done < "$TEST_DIR/function_names"
 
         [ "$copies" -gt 0 ] || fail "$script defines no embedded copies of lib/ functions"
+
+        # Every common_*/tui_* function the script calls must exist without lib/: a call of a
+        # function that has no embedded copy fails under `bash <(curl ...)`.
+        grep -ohE '\b(common|tui)_[a-z0-9_]+\b' "$ROOT_DIR/$script" | sort -u > "$TEST_DIR/called_names"
+        undefined="$(undefined_functions "$TEST_DIR/standalone/$script.d/$script" "$TEST_DIR/called_names")"
+        [ -z "$undefined" ] || fail "$script calls functions that are undefined without lib/: $(tr '\n' ' ' <<<"$undefined")"
         total=$((total + copies))
     done
 
