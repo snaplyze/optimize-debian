@@ -821,36 +821,6 @@ subsection() {
     log_silent "--- $title ---"
 }
 
-# Run command silently, show error only on failure
-run_silent() {
-    local cmd="$*"
-    local output
-    local exit_code
-    
-    log_silent "Running: $cmd"
-    output=$(eval "$cmd" 2>&1) && exit_code=$? || exit_code=$?
-    
-    if [ $exit_code -ne 0 ]; then
-        error "Command failed: $cmd"
-        if [ -n "$output" ]; then
-            echo -e "    ${DIM}${output}${NC}" | head -5
-        fi
-        log_silent "FAILED: $output"
-        return $exit_code
-    fi
-    
-    log_silent "Success: $cmd"
-    return 0
-}
-
-require_command() {
-    local cmd="$1"
-    command -v "$cmd" >/dev/null 2>&1 || {
-        error "Required command not found: $cmd"
-        exit 1
-    }
-}
-
 restore_linux_home_path_ownership() {
     local target_path="$1"
     local desired_user="${2:-}"
@@ -891,16 +861,6 @@ wsl_apt_update_check() {
 }
 COMMON_APT_UPDATE_CHECK=wsl_apt_update_check
 
-run_as_user() {
-    local username="$1"
-    shift
-    if [ "$username" = "root" ]; then
-        "$@"
-    else
-        su - "$username" -c "$(printf '%q ' "$@")"
-    fi
-}
-
 is_supported_debian_version() {
     common_is_supported_debian_version "${1:-}"
 }
@@ -919,14 +879,6 @@ require_supported_debian_release() {
 }
 
 resolve_fetch_packages() {
-    if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
-        case "${VERSION_ID%%.*}" in
-            13) printf '%s\n' "fastfetch" ;;
-            12) printf '%s\n' "neofetch" ;;
-        esac
-        return 0
-    fi
-
     if common_package_available fastfetch; then
         printf '%s\n' "fastfetch"
     elif common_package_available neofetch; then
@@ -1019,16 +971,8 @@ has_user_systemd() {
     systemctl --user show-environment >/dev/null 2>&1
 }
 
-sudo_or_su() {
-    if command -v sudo >/dev/null 2>&1; then
-        sudo "$@"
-    else
-        su -c "$*"
-    fi
-}
-
 # Check if running as root
-if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" && $EUID -ne 0 ]]; then
+if [[ $EUID -ne 0 ]]; then
    error "This script must be run as root (use sudo)"
    exit 1
 fi
@@ -1497,11 +1441,6 @@ if $CONFIGURE_LOCALES; then
     # Install locales package with availability check
     common_safe_install locales || warn "locales package was not installed, locale generation may fail"
     
-    # Check if dialog is available, fallback to read if not
-check_dialog() {
-    tui_has_visual_backend
-}
-
 # Locale selection
     echo "Select default system locale (English and Russian UTF-8 are always generated):"
     echo "1) en_US.UTF-8 (English)"

@@ -395,11 +395,17 @@ done
 
 ### System Limits
 ```bash
-# /etc/security/limits.conf
-* soft nofile 524288
-* hard nofile 524288
-* soft nproc 131072
-* hard nproc 131072
+# /etc/security/limits.d/99-vps-limits.conf (единственное место лимитов; повторный запуск его перезаписывает)
+* soft nofile 65535
+* hard nofile 65535
+* soft nproc 65535
+* hard nproc 65535
+* soft memlock unlimited
+* hard memlock unlimited
+root soft nofile 65535
+root hard nofile 65535
+root soft nproc 65535
+root hard nproc 65535
 ```
 
 ## 🛠️ Утилиты скрипта
