@@ -688,18 +688,6 @@ subsection() {
     log_silent "--- $title ---"
 }
 
-# Run command silently, show only on error
-run_silent() {
-    local cmd="$1"
-    local desc="${2:-Running command}"
-    
-    if ! eval "$cmd" >/dev/null 2>&1; then
-        error "$desc failed"
-        return 1
-    fi
-    return 0
-}
-
 append_authorized_key_unique() {
     local ssh_key="$1"
     local target_file="$2"
@@ -960,31 +948,140 @@ enable_ntp_sync() {
     return 1
 }
 
+# System limits: one drop-in holds every limit the script sets, so a repeated
+# run rewrites the same file and the summary reports the same value.
+VPS_LIMITS_FILE="/etc/security/limits.d/99-vps-limits.conf"
+VPS_NOFILE_LIMIT=65535
+VPS_NPROC_LIMIT=65535
+VPS_MEMLOCK_LIMIT="unlimited"
+
+write_system_limits() {
+    cat > "$VPS_LIMITS_FILE" <<EOF
+# VPS Limits Optimization (VPN server, 1-4GB RAM)
+* soft nofile $VPS_NOFILE_LIMIT
+* hard nofile $VPS_NOFILE_LIMIT
+* soft nproc $VPS_NPROC_LIMIT
+* hard nproc $VPS_NPROC_LIMIT
+* soft memlock $VPS_MEMLOCK_LIMIT
+* hard memlock $VPS_MEMLOCK_LIMIT
+root soft nofile $VPS_NOFILE_LIMIT
+root hard nofile $VPS_NOFILE_LIMIT
+root soft nproc $VPS_NPROC_LIMIT
+root hard nproc $VPS_NPROC_LIMIT
+EOF
+}
+
+# Write stdin to a config file; if the file exists with different content,
+# keep a copy first (<file>.backup.<date>, numbered if that name is taken).
+# Identical content leaves the file and the backups untouched.
+write_config_with_backup() {
+    local target="$1"
+    local new_file backup n=0
+
+    new_file="$(mktemp)" || return 1
+    cat > "$new_file"
+
+    if [ -e "$target" ] && ! cmp -s "$new_file" "$target"; then
+        backup="$target.backup.$(date +%F)"
+        while [ -e "$backup" ]; do
+            n=$((n + 1))
+            backup="$target.backup.$(date +%F).$n"
+        done
+        cp -p "$target" "$backup" || { rm -f "$new_file"; return 1; }
+        log "Backed up $target to $backup"
+    fi
+
+    if ! cat "$new_file" > "$target"; then
+        rm -f "$new_file"
+        return 1
+    fi
+    rm -f "$new_file"
+}
+
+# SSH hardening drop-in. A config that fails `sshd -t` is removed and sshd is
+# not restarted; a restart failure is reported and fails the step.
+SSHD_CONFIG_FILE="/etc/ssh/sshd_config"
+SSH_HARDENING_FILE="/etc/ssh/sshd_config.d/99-hardening.conf"
+
+# Puts back the drop-in saved in $1 (a temporary copy, removed here) or removes ours.
+restore_ssh_hardening_dropin() {
+    local previous_dropin="${1:-}"
+
+    if [ -n "$previous_dropin" ]; then
+        if ! cat "$previous_dropin" > "$SSH_HARDENING_FILE"; then
+            error "Could not restore $SSH_HARDENING_FILE; its previous content is in $previous_dropin"
+            return 1
+        fi
+        rm -f "$previous_dropin"
+    else
+        rm -f "$SSH_HARDENING_FILE"
+    fi
+}
+
+configure_ssh_hardening() {
+    local allowed_user="$1"
+    local previous_dropin=""
+
+    cp "$SSHD_CONFIG_FILE" "$SSHD_CONFIG_FILE.backup.$(date +%F)" 2>/dev/null || true
+
+    # Keep the drop-in of an earlier run so a rejected config does not take it away.
+    if [ -e "$SSH_HARDENING_FILE" ]; then
+        previous_dropin="$(mktemp)" || return 1
+        cp -p "$SSH_HARDENING_FILE" "$previous_dropin" || { rm -f "$previous_dropin"; return 1; }
+    fi
+
+    if ! cat > "$SSH_HARDENING_FILE" <<EOF
+# SSH Hardening - VPS Optimization
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+ClientAliveInterval 300
+ClientAliveCountMax 2
+MaxAuthTries 3
+MaxSessions 10
+AllowTcpForwarding yes
+
+# Only allow specific user
+AllowUsers $allowed_user
+EOF
+    then
+        error "Could not write $SSH_HARDENING_FILE; the SSH configuration is unchanged"
+        restore_ssh_hardening_dropin "$previous_dropin"
+        return 1
+    fi
+
+    if ! sshd -t; then
+        error "SSH configuration test failed! Reverting changes..."
+        restore_ssh_hardening_dropin "$previous_dropin"
+        return 1
+    fi
+    rm -f "$previous_dropin"
+
+    log "SSH configuration is valid"
+    if ! systemctl restart ssh.service >/dev/null 2>&1 && ! systemctl restart sshd.service; then
+        error "Failed to restart the SSH service; the hardening config is in place but not active"
+        return 1
+    fi
+    log "SSH service restarted with new configuration"
+}
+
 # shellcheck disable=SC2317
 if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
     return 0 2>/dev/null || exit 0
 fi
-
-# Yes/No prompt with default value
-prompt_yn() {
-    local prompt="$1"
-    local default="$2"
-    local default_yes=false
-
-    [ "$default" = "yes" ] && default_yes=true
-    TUI_PROMPT_PREFIX="" tui_prompt_yn "$prompt" "$default_yes"
-}
 
 # Check if running as root
 if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" && $EUID -ne 0 ]]; then
    error "This script must be run as root (use sudo)"
    exit 1
 fi
-
-# Check if dialog is available, fallback to read if not
-check_dialog() {
-    tui_has_visual_backend
-}
 
 tui_init || true
 log "=== Starting VPS Optimization ==="
@@ -2184,7 +2281,7 @@ fi
 
 # Configure Docker daemon for better performance BEFORE starting service
 mkdir -p /etc/docker
-cat > /etc/docker/daemon.json <<EOF
+write_config_with_backup /etc/docker/daemon.json <<EOF
 {
   "log-driver": "json-file",
   "log-opts": {
@@ -2503,7 +2600,7 @@ log "Step 14: Configuring Fail2Ban..."
 systemctl enable fail2ban
 systemctl start fail2ban
 
-cat > /etc/fail2ban/jail.local <<EOF
+write_config_with_backup /etc/fail2ban/jail.local <<EOF
 [DEFAULT]
 bantime = 3600
 findtime = 600
@@ -2526,17 +2623,7 @@ systemctl restart fail2ban
 ################################################################################
 log "Step 15: Optimizing system limits..."
 
-cat > /etc/security/limits.d/99-vps-limits.conf <<EOF
-# VPS Limits Optimization
-* soft nofile 65535
-* hard nofile 65535
-* soft nproc 65535
-* hard nproc 65535
-root soft nofile 65535
-root hard nofile 65535
-root soft nproc 65535
-root hard nproc 65535
-EOF
+write_system_limits
 
 ################################################################################
 # 14. Automatic Security Updates
@@ -2566,41 +2653,7 @@ systemctl restart systemd-journald
 ################################################################################
 log "Step 18: Hardening SSH configuration..."
 
-cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.backup.$(date +%F)" 2>/dev/null || true
-
-# Create hardening config
-cat > /etc/ssh/sshd_config.d/99-hardening.conf <<EOF
-# SSH Hardening - VPS Optimization
-PermitRootLogin no
-PasswordAuthentication no
-PubkeyAuthentication yes
-PermitEmptyPasswords no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-UsePAM yes
-X11Forwarding no
-PrintMotd no
-AcceptEnv LANG LC_*
-ClientAliveInterval 300
-ClientAliveCountMax 2
-MaxAuthTries 3
-MaxSessions 10
-AllowTcpForwarding yes
-
-# Only allow specific user
-AllowUsers $NEW_USER
-EOF
-
-# Test SSH configuration
-if sshd -t; then
-    log "SSH configuration is valid"
-    systemctl restart ssh.service >/dev/null 2>&1 || systemctl restart sshd.service
-    log "SSH service restarted with new configuration"
-else
-    error "SSH configuration test failed! Reverting changes..."
-    rm -f /etc/ssh/sshd_config.d/99-hardening.conf
-    exit 1
-fi
+configure_ssh_hardening "$NEW_USER" || exit 1
 
 ################################################################################
 # 25. Optimize tmpfs
@@ -2719,39 +2772,6 @@ EOF
 else
     warn "CPU frequency scaling not available (virtual CPU or governor not supported)"
 fi
-
-################################################################################
-# 27. System Limits Optimization
-################################################################################
-log "Step 23: Optimizing system limits..."
-
-# Backup existing limits.conf
-cp /etc/security/limits.conf "/etc/security/limits.conf.backup.$(date +%F)" 2>/dev/null || true
-
-# Add optimized limits for VPN server
-cat >> /etc/security/limits.conf <<'LIMITS'
-
-# ============================================================================
-# VPS Optimization - System Limits for VPN Server (1-4GB RAM)
-# ============================================================================
-
-# Open file limits (moderate for low RAM VPS)
-*               soft    nofile          262144
-*               hard    nofile          262144
-root            soft    nofile          262144
-root            hard    nofile          262144
-
-# Process limits
-*               soft    nproc           16384
-*               hard    nproc           16384
-
-# Memory lock (for VPN encryption)
-*               soft    memlock         unlimited
-*               hard    memlock         unlimited
-
-LIMITS
-
-log "System limits optimized"
 
 ################################################################################
 # 24. Create Monitoring Script
@@ -3014,7 +3034,7 @@ fi
 info "Swap configured (${SWAP_SIZE}GB, swappiness=$SWAPPINESS)"
 info "Firewall (UFW) enabled with forward policy ACCEPT, SSH, HTTP, HTTPS"
 info "Fail2Ban configured with python3-systemd for SSH protection"
-info "System limits increased (nofile 524288)"
+info "System limits increased (nofile $VPS_NOFILE_LIMIT)"
 info "Automatic security updates enabled"
 info "Journal logs limited to 500MB"
 info "SSH hardened (root login disabled, only key auth)"

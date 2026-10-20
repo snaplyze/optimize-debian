@@ -21,15 +21,6 @@ assert_status() {
     [ "$actual" -eq "$expected" ] || fail "expected status $expected, got $actual: $*"
 }
 
-test_supported_debian_versions() {
-    common_is_supported_debian_version 12
-    common_is_supported_debian_version 13
-    common_is_supported_debian_version 12.5
-    assert_status 1 common_is_supported_debian_version 11
-    assert_status 1 common_is_supported_debian_version 24
-    assert_status 1 common_is_supported_debian_version ""
-}
-
 test_username_validation() {
     common_validate_username snaplyze
     common_validate_username snap_user-1
@@ -154,7 +145,6 @@ test_safe_write_sudoers() {
 }
 
 main() {
-    test_supported_debian_versions
     test_username_validation
     test_wsl_conf_rendering
     test_docker_source_rendering

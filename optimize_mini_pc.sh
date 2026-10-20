@@ -721,18 +721,6 @@ subsection() {
     log_silent "--- $title ---"
 }
 
-# Run command silently, show only on error
-run_silent() {
-    local cmd="$1"
-    local desc="${2:-Running command}"
-    
-    if ! eval "$cmd" >/dev/null 2>&1; then
-        error "$desc failed"
-        return 1
-    fi
-    return 0
-}
-
 append_authorized_key_unique() {
     local ssh_key="$1"
     local target_file="$2"
@@ -959,6 +947,356 @@ resolve_intel_media_packages() {
     printf '%s\n' "${packages[@]}"
 }
 
+# Paths of the system files the steps below write. Constants, so that tests
+# can point them at a temporary tree after sourcing the script.
+SSHD_HARDENING_FILE="/etc/ssh/sshd_config.d/99-hardening.conf"
+FAIL2BAN_JAIL_LOCAL="/etc/fail2ban/jail.local"
+SAMBA_CONF="/etc/samba/smb.conf"
+SAMBA_SHARE_PATH="/mnt/ssd"
+UFW_BIN="/usr/sbin/ufw"
+
+# Succeeds when $1 is one authorized_keys line that starts with a key type and that
+# ssh-keygen can read. ssh-keygen -l alone also takes "host ssh-ed25519 AAAA..."
+# (known_hosts format), which sshd does not accept in authorized_keys.
+is_valid_ssh_public_key() {
+    local key="${1:-}"
+    local key_file
+    local rc=0
+
+    case "$key" in
+        *$'\n'* | *$'\r'*) return 1 ;;
+        ssh-ed25519\ * | ssh-rsa\ * | ecdsa-sha2-nistp256\ * | ecdsa-sha2-nistp384\ * | ecdsa-sha2-nistp521\ * | \
+            sk-ssh-ed25519@openssh.com\ * | sk-ecdsa-sha2-nistp256@openssh.com\ *) ;;
+        *) return 1 ;;
+    esac
+
+    key_file="$(mktemp)" || return 1
+    printf '%s\n' "$key" > "$key_file"
+    ssh-keygen -l -f "$key_file" >/dev/null 2>&1 < /dev/null || rc=1
+    rm -f "$key_file"
+    return "$rc"
+}
+
+# Restart the SSH unit; errors of both attempts stay visible.
+restart_ssh_service() {
+    systemctl restart ssh.service || systemctl restart sshd.service
+}
+
+# Put the previous drop-in back (or remove ours when there was none).
+revert_ssh_hardening_dropin() {
+    local backup="${1:-}"
+
+    if [ -n "$backup" ]; then
+        cp -p "$backup" "$SSHD_HARDENING_FILE"
+    else
+        rm -f "$SSHD_HARDENING_FILE"
+    fi
+}
+
+# Key-only login for $1. The drop-in stays only when `sshd -t` accepts it and
+# SSH restarts with it; otherwise the previous state is restored and 1 returned.
+# The new drop-in is written to a temporary file and moved into place, so a write
+# error never leaves an empty or partial file over the previous one.
+apply_ssh_hardening() {
+    local user="$1"
+    local dropin_dir
+    local backup=""
+    local new_file=""
+
+    dropin_dir="$(dirname "$SSHD_HARDENING_FILE")"
+    if ! mkdir -p "$dropin_dir"; then
+        error "Cannot create $dropin_dir; SSH hardening is not applied"
+        return 1
+    fi
+
+    if [ -e "$SSHD_HARDENING_FILE" ]; then
+        if ! backup="$(mktemp)" || ! cp -p "$SSHD_HARDENING_FILE" "$backup"; then
+            error "Cannot back up the existing $SSHD_HARDENING_FILE; SSH hardening is not applied"
+            [ -z "$backup" ] || rm -f "$backup"
+            return 1
+        fi
+    fi
+
+    if ! new_file="$(mktemp "$dropin_dir/.99-hardening.XXXXXX")" ||
+        ! printf '%s\n' \
+            "PermitRootLogin no" \
+            "PasswordAuthentication no" \
+            "PubkeyAuthentication yes" \
+            "AllowUsers $user" > "$new_file" ||
+        ! chmod 644 "$new_file" ||
+        ! mv -f "$new_file" "$SSHD_HARDENING_FILE"; then
+        error "Cannot write $SSHD_HARDENING_FILE; SSH hardening is not applied, the previous file is unchanged"
+        [ -z "$new_file" ] || rm -f "$new_file"
+        [ -z "$backup" ] || rm -f "$backup"
+        return 1
+    fi
+
+    if ! sshd -t; then
+        error "SSH configuration test failed; reverting $SSHD_HARDENING_FILE, SSH is not restarted"
+        revert_ssh_hardening_dropin "$backup"
+        [ -z "$backup" ] || rm -f "$backup"
+        return 1
+    fi
+
+    if ! restart_ssh_service; then
+        error "Failed to restart the SSH service with the hardened configuration; reverting $SSHD_HARDENING_FILE"
+        revert_ssh_hardening_dropin "$backup"
+        if ! restart_ssh_service; then
+            error "SSH still does not restart after the revert; check 'systemctl status ssh' on the console"
+        fi
+        [ -z "$backup" ] || rm -f "$backup"
+        return 1
+    fi
+
+    [ -z "$backup" ] || rm -f "$backup"
+    return 0
+}
+
+# Asks for an SSH public key on stdin, adds it to $2/.ssh/authorized_keys for user $1
+# and, with CONFIGURE_SECURITY, hardens SSH and waits for the operator to confirm a
+# login with the key. Without a key SSH is left alone and CONFIGURE_SECURITY is cleared.
+setup_ssh_access() {
+    local user="$1"
+    local user_home="$2"
+    local ssh_key=""
+
+    mkdir -p "$user_home/.ssh"
+    chmod 700 "$user_home/.ssh"
+
+    echo ""
+    info "Please paste your SSH public key (the content of your id_rsa.pub or id_ed25519.pub):"
+    info "If you don't have one, generate it on your local machine with: ssh-keygen -t ed25519"
+    info "Press Enter to skip SSH key setup (you can add it later)"
+    echo ""
+    while true; do
+        read -r -p "SSH Public Key: " ssh_key || ssh_key=""
+        if [ -z "$ssh_key" ] || is_valid_ssh_public_key "$ssh_key"; then
+            break
+        fi
+        warn "That is not a valid SSH public key (one line starting with ssh-ed25519, ssh-rsa, ecdsa-sha2-... or sk-...). Try again or press Enter to skip."
+    done
+
+    if [ -z "$ssh_key" ]; then
+        warn "SSH key setup skipped. You can add a key later to ~/.ssh/authorized_keys"
+        if $CONFIGURE_SECURITY; then
+            warn "SSH hardening skipped (no SSH key provided)"
+            CONFIGURE_SECURITY=false
+        fi
+        return 0
+    fi
+
+    append_authorized_key_unique "$ssh_key" "$user_home/.ssh/authorized_keys"
+    chown -R "$user:$user" "$user_home/.ssh"
+    log "SSH public key added for $user"
+
+    $CONFIGURE_SECURITY || return 0
+
+    log "Hardening SSH configuration..."
+    if apply_ssh_hardening "$user"; then
+        log "SSH hardened: only $user can login with SSH keys"
+        echo ""
+        warn "IMPORTANT: Please test SSH login with the new key in another terminal before continuing!"
+        warn "Command: ssh $user@$(hostname -I | awk '{print $1}')"
+        echo ""
+        read -r -p "Press Enter once you've verified SSH access works..." || true
+    else
+        warn "SSH hardening was NOT applied; password and root login are unchanged. Fix the SSH configuration and re-run the script"
+    fi
+}
+
+# Network of an IPv4 address with prefix ("192.168.1.50/24" -> "192.168.1.0/24"). Prefix 1-32.
+ipv4_network_cidr() {
+    local cidr="${1:-}"
+    local a b c d len ip mask net
+
+    [[ "$cidr" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] || return 1
+    a=$((10#${BASH_REMATCH[1]}))
+    b=$((10#${BASH_REMATCH[2]}))
+    c=$((10#${BASH_REMATCH[3]}))
+    d=$((10#${BASH_REMATCH[4]}))
+    len=$((10#${BASH_REMATCH[5]}))
+    [ "$a" -le 255 ] && [ "$b" -le 255 ] && [ "$c" -le 255 ] && [ "$d" -le 255 ] || return 1
+    [ "$len" -ge 1 ] && [ "$len" -le 32 ] || return 1
+
+    ip=$(( (a << 24) | (b << 16) | (c << 8) | d ))
+    mask=$(( (0xFFFFFFFF << (32 - len)) & 0xFFFFFFFF ))
+    net=$(( ip & mask ))
+    printf '%d.%d.%d.%d/%d\n' \
+        $(( (net >> 24) & 255 )) $(( (net >> 16) & 255 )) $(( (net >> 8) & 255 )) $(( net & 255 )) "$len"
+}
+
+# Succeeds for an RFC 1918 network (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 ranges).
+is_private_ipv4_network() {
+    local net="${1:-}"
+    local a b
+
+    [[ "$net" =~ ^([0-9]+)\.([0-9]+)\. ]] || return 1
+    a="${BASH_REMATCH[1]}"
+    b="${BASH_REMATCH[2]}"
+    [ "$a" -eq 10 ] && return 0
+    [ "$a" -eq 172 ] && [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 0
+    [ "$a" -eq 192 ] && [ "$b" -eq 168 ] && return 0
+    return 1
+}
+
+# Prints the private IPv4 network of the default-route interface (e.g. 192.168.1.0/24).
+detect_lan_subnet() {
+    local iface addr net
+
+    iface="$(ip -o -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')"
+    [ -n "$iface" ] || return 1
+    addr="$(ip -o -4 addr show dev "$iface" 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "inet") { print $(i + 1); exit }}')"
+    [ -n "$addr" ] || return 1
+    # A /31 or /32 is a point-to-point link, not a LAN.
+    [ "${addr#*/}" -le 30 ] 2>/dev/null || return 1
+    net="$(ipv4_network_cidr "$addr")" || return 1
+    is_private_ipv4_network "$net" || return 1
+    printf '%s\n' "$net"
+}
+
+is_interactive_session() {
+    [ -t 0 ]
+}
+
+# Sets SAMBA_SUBNET: detected from the default route, else asked for. Fails without one.
+# A typed network outside the private ranges needs a confirmation.
+resolve_samba_subnet() {
+    local detected input net answer
+
+    SAMBA_SUBNET=""
+    if detected="$(detect_lan_subnet)"; then
+        SAMBA_SUBNET="$detected"
+        return 0
+    fi
+
+    is_interactive_session || return 1
+    warn "Could not determine the local network automatically"
+    while true; do
+        read -r -p "  Local network allowed to use Samba (CIDR, e.g. 192.168.1.0/24; Enter to skip): " input || return 1
+        [ -n "$input" ] || return 1
+        if ! net="$(ipv4_network_cidr "$input")"; then
+            warn "Invalid network '$input'. Use IPv4 CIDR notation, e.g. 192.168.1.0/24"
+            continue
+        fi
+        if ! is_private_ipv4_network "$net"; then
+            warn "$net is not a private (RFC 1918) network: SMB would be open to everything in it"
+            read -r -p "  Use it anyway? (y/N): " answer || answer=""
+            [[ "$answer" =~ ^[Yy]$ ]] || continue
+        fi
+        SAMBA_SUBNET="$net"
+        return 0
+    done
+}
+
+# Samba (SMB) is opened only for the local network (IPv4), never for any source. The
+# rule for any source that earlier versions of this script added is always removed.
+configure_samba_firewall() {
+    command -v "$UFW_BIN" &> /dev/null || return 0
+
+    if resolve_samba_subnet; then
+        "$UFW_BIN" allow from "$SAMBA_SUBNET" to any app Samba
+        log "Firewall rule added: Samba only from $SAMBA_SUBNET"
+    else
+        warn "Samba firewall rule NOT added: the local network is unknown, so SMB is closed in UFW"
+        warn "To open it for your LAN: ufw allow from <your-lan-subnet> to any app Samba   (e.g. 192.168.1.0/24)"
+    fi
+
+    if ! "$UFW_BIN" --force delete allow Samba > /dev/null; then
+        warn "Could not remove the rule 'ufw allow Samba' (any source); check 'ufw status' and delete it if present"
+    fi
+}
+
+# Owner and mode of the share root only: never recursive, the disk content is the owner's.
+prepare_share_root() {
+    local dir="$1"
+    local user="$2"
+
+    chown "$user:$user" "$dir"
+    chmod 755 "$dir"
+}
+
+# Succeeds when smb.conf $1 defines share [$2].
+samba_share_defined() {
+    grep -q "^\[$2\]" "$1"
+}
+
+# Adds share [$2] (directory $3, user $4) to smb.conf $1 on the first run only. The
+# share root gets its owner and mode then; the content of the disk is never touched,
+# and a share that already exists is left as it is.
+ensure_samba_share() {
+    local conf="$1" share_name="$2" path="$3" user="$4"
+
+    if samba_share_defined "$conf" "$share_name"; then
+        warn "Share [$share_name] already exists in smb.conf; its definition and $path permissions are left unchanged"
+        return 0
+    fi
+
+    log "Setting owner of $path to $user (the share root only)..."
+    prepare_share_root "$path" "$user"
+    cat >> "$conf" <<SMB_EOF
+
+[$share_name]
+   path = $path
+   browsable = yes
+   writable = yes
+   guest ok = no
+   read only = no
+   create mask = 0644
+   directory mask = 0755
+   valid users = $user
+SMB_EOF
+}
+
+# Comments out the [homes] section of smb.conf $1 (header and parameters, up to the
+# next section header). Other sections keep identical lines.
+disable_samba_homes_section() {
+    local conf="$1"
+    local tmp
+
+    tmp="$(mktemp)"
+    if ! awk '
+        /^[[:space:]]*\[/ { in_homes = ($0 ~ /^[[:space:]]*\[homes\][[:space:]]*$/) }
+        in_homes && $0 !~ /^[[:space:]]*([;#]|$)/ { print ";" $0; next }
+        { print }
+    ' "$conf" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    # cat keeps the owner and mode of the original file.
+    cat "$tmp" > "$conf"
+    rm -f "$tmp"
+}
+
+# Writes the Fail2Ban jail.local; a different existing file is copied to jail.local.bak[.N] first.
+write_fail2ban_jail_local() {
+    local backup="${FAIL2BAN_JAIL_LOCAL}.bak"
+    local n=0
+    local tmp
+
+    tmp="$(mktemp)"
+    cat > "$tmp" <<JAIL_EOF
+[DEFAULT]
+backend = systemd
+
+[sshd]
+enabled = true
+port = 22
+maxretry = 3
+bantime = 3600
+JAIL_EOF
+
+    if [ -e "$FAIL2BAN_JAIL_LOCAL" ] && ! cmp -s "$tmp" "$FAIL2BAN_JAIL_LOCAL"; then
+        while [ -e "$backup" ]; do
+            n=$((n + 1))
+            backup="${FAIL2BAN_JAIL_LOCAL}.bak.${n}"
+        done
+        cp -p "$FAIL2BAN_JAIL_LOCAL" "$backup"
+        log "Existing $FAIL2BAN_JAIL_LOCAL saved to $backup"
+    fi
+    cat "$tmp" > "$FAIL2BAN_JAIL_LOCAL"
+    rm -f "$tmp"
+}
+
 # shellcheck disable=SC2317
 if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
     return 0 2>/dev/null || exit 0
@@ -968,11 +1306,6 @@ fi
 prompt_yn() {
     local prompt="$1" default_yes="$2"
     TUI_PROMPT_PREFIX=" - " tui_prompt_yn "$prompt" "$default_yes"
-}
-
-# Check if dialog is available
-check_dialog() {
-    tui_has_visual_backend
 }
 
 ################################################################################
@@ -1349,39 +1682,7 @@ if $CREATE_USER; then
     
     # Setup SSH keys
     USER_HOME=$(common_user_home "$NEW_USER" || echo "/home/$NEW_USER")
-    mkdir -p "$USER_HOME/.ssh"
-    chmod 700 "$USER_HOME/.ssh"
-    
-    echo ""
-    info "Please paste your SSH public key (the content of your id_rsa.pub or id_ed25519.pub):"
-    info "If you don't have one, generate it on your local machine with: ssh-keygen -t ed25519"
-    info "Press Enter to skip SSH key setup (you can add it later)"
-    echo ""
-    read -r -p "SSH Public Key: " SSH_PUBLIC_KEY
-    
-    if [ -n "$SSH_PUBLIC_KEY" ]; then
-        append_authorized_key_unique "$SSH_PUBLIC_KEY" "$USER_HOME/.ssh/authorized_keys"
-        chown -R "$NEW_USER:$NEW_USER" "$USER_HOME/.ssh"
-        log "SSH public key added for $NEW_USER"
-        
-        if $CONFIGURE_SECURITY; then
-            log "Hardening SSH configuration..."
-            cat > /etc/ssh/sshd_config.d/99-hardening.conf <<EOF
-PermitRootLogin no
-PasswordAuthentication no
-PubkeyAuthentication yes
-AllowUsers $NEW_USER
-EOF
-            systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || true
-            log "SSH hardened: only $NEW_USER can login with SSH keys"
-        fi
-    else
-        warn "SSH key setup skipped. You can add a key later to ~/.ssh/authorized_keys"
-        if $CONFIGURE_SECURITY; then
-            warn "SSH hardening skipped (no SSH key provided)"
-            CONFIGURE_SECURITY=false
-        fi
-    fi
+    setup_ssh_access "$NEW_USER" "$USER_HOME"
 else
     NEW_USER=$(logname 2>/dev/null || echo "$SUDO_USER")
     [ -z "$NEW_USER" ] && NEW_USER="root"
@@ -2432,16 +2733,7 @@ if $CONFIGURE_SECURITY; then
     /usr/sbin/ufw --force enable
     
     # Fail2Ban
-    cat > /etc/fail2ban/jail.local <<EOF
-[DEFAULT]
-backend = systemd
-
-[sshd]
-enabled = true
-port = 22
-maxretry = 3
-bantime = 3600
-EOF
+    write_fail2ban_jail_local
     systemctl restart fail2ban
     
     # Auto Updates
@@ -2454,57 +2746,28 @@ fi
 if $INSTALL_SAMBA; then
     section "Step 12: Samba"
     
-    # Check if /mnt/ssd exists
-    if [ ! -d "/mnt/ssd" ]; then
-        warn "Directory /mnt/ssd does not exist! Skipping Samba configuration."
-        warn "Please mount your drive to /mnt/ssd and configure Samba manually later."
+    # Check if the share directory exists
+    if [ ! -d "$SAMBA_SHARE_PATH" ]; then
+        warn "Directory $SAMBA_SHARE_PATH does not exist! Skipping Samba configuration."
+        warn "Please mount your drive to $SAMBA_SHARE_PATH and configure Samba manually later."
     else
-        # Fix permissions for the share directory
-        log "Setting permissions for /mnt/ssd to user $NEW_USER..."
-        chown -R "$NEW_USER:$NEW_USER" /mnt/ssd
-        chmod -R 755 /mnt/ssd
-        
         common_safe_install samba || {
             error "Samba installation failed"
             exit 1
         }
         
         # Backup config
-        [ ! -f /etc/samba/smb.conf.bak ] && cp /etc/samba/smb.conf /etc/samba/smb.conf.bak
+        [ ! -f "$SAMBA_CONF.bak" ] && cp "$SAMBA_CONF" "$SAMBA_CONF.bak"
         
         # Configure global settings (Enable SMB2+ for modern clients)
-        if ! grep -q "server min protocol" /etc/samba/smb.conf; then
-            sed -i '/\[global\]/a \   server min protocol = SMB2' /etc/samba/smb.conf
+        if ! grep -q "server min protocol" "$SAMBA_CONF"; then
+            sed -i '/\[global\]/a \   server min protocol = SMB2' "$SAMBA_CONF"
         fi
         
-        # Disable default [homes] share PROPERLY (comment out all lines to prevent global leakage)
-        # We use a loop to comment out the [homes] section and its commonly associated parameters
-        # This is safer than simple sed replacement which might miss indented lines
-        sed -i 's/^\[homes\]/;\[homes\]/g' /etc/samba/smb.conf
-        sed -i 's/^   comment = Home Directories/;   comment = Home Directories/g' /etc/samba/smb.conf
-        sed -i 's/^   browseable = no/;   browseable = no/g' /etc/samba/smb.conf
-        sed -i 's/^   read only = yes/;   read only = yes/g' /etc/samba/smb.conf
-        sed -i 's/^   create mask = 0700/;   create mask = 0700/g' /etc/samba/smb.conf
-        sed -i 's/^   directory mask = 0700/;   directory mask = 0700/g' /etc/samba/smb.conf
-        sed -i 's/^   valid users = %S/;   valid users = %S/g' /etc/samba/smb.conf
+        # Disable the default [homes] share (only that section, other sections keep their lines)
+        disable_samba_homes_section "$SAMBA_CONF"
         
-        # Add share if not exists (simple check)
-        if ! grep -q "\[$SAMBA_SHARE_NAME\]" /etc/samba/smb.conf; then
-            cat >> /etc/samba/smb.conf <<EOF
-
-[$SAMBA_SHARE_NAME]
-   path = /mnt/ssd
-   browsable = yes
-   writable = yes
-   guest ok = no
-   read only = no
-   create mask = 0644
-   directory mask = 0755
-   valid users = $NEW_USER
-EOF
-        else
-            warn "Share [$SAMBA_SHARE_NAME] might already exist in smb.conf"
-        fi
+        ensure_samba_share "$SAMBA_CONF" "$SAMBA_SHARE_NAME" "$SAMBA_SHARE_PATH" "$NEW_USER"
         
         log "Samba configured. Please set SMB password for user: $NEW_USER"
         log "Note: This password can be different from system password."
@@ -2518,11 +2781,8 @@ EOF
         systemctl restart smbd
         log "Samba service restarted."
         
-        # Enable firewall rule for Samba (now that package is installed and profile exists)
-        if command -v /usr/sbin/ufw &> /dev/null; then
-            /usr/sbin/ufw allow Samba
-            log "Firewall rules updated for Samba."
-        fi
+        # Firewall rule for Samba (now that package is installed and profile exists)
+        configure_samba_firewall
     fi
 fi
 

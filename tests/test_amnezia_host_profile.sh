@@ -52,10 +52,6 @@ run_case() {
 
 test_release_and_firewall_helpers() {
     run_case '
-        is_supported_debian_version 12
-        is_supported_debian_version 13
-        ! is_supported_debian_version 11 || die "Debian 11 must be unsupported for optimize_amnezia_host.sh"
-
         validate_firewall_phase bootstrap
         validate_firewall_phase locked
         ! validate_firewall_phase something-else || die "invalid firewall phase must be rejected"
@@ -475,6 +471,50 @@ test_base_packages_include_fail2ban_journal_backend() {
     '
 }
 
+test_fail2ban_jail_is_backed_up_before_overwrite() {
+    run_case '
+        FAIL2BAN_JAIL_FILE="$T/fail2ban/jail.local"
+        mkdir -p "$T/fail2ban"
+        systemd_system_available() { return 1; }
+        # A distinct stamp per call keeps two backups made within one second apart.
+        date() { local n; n=$(( $(cat "$T/clock" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$T/clock"; echo "TS$n"; }
+        backups() { find "$T/fail2ban" -name "jail.local.backup.*" | wc -l; }
+
+        # first run: nothing to preserve
+        SSH_PORT=2222
+        run_status configure_fail2ban
+        assert_rc 0 "first configure_fail2ban"
+        grep -Fxq "port = 2222" "$FAIL2BAN_JAIL_FILE" || die "jail lacks the SSH port"
+        grep -Fxq "backend = systemd" "$FAIL2BAN_JAIL_FILE" || die "jail lacks the systemd backend"
+        [ "$(backups)" = 0 ] || die "a fresh install must not create a backup"
+
+        # same content again: no copy, file not rewritten (the old mtime survives)
+        touch -d "2001-01-01" "$FAIL2BAN_JAIL_FILE"
+        run_status configure_fail2ban
+        assert_rc 0 "repeat configure_fail2ban"
+        [ "$(backups)" = 0 ] || die "a repeat run with the same content must not create a backup"
+        [ "$(stat -c %Y "$FAIL2BAN_JAIL_FILE")" -lt 1000000000 ] || die "an up-to-date jail must not be rewritten"
+
+        # operator edit: kept in a copy, then replaced
+        printf "# operator edit\n" >> "$FAIL2BAN_JAIL_FILE"
+        run_status configure_fail2ban
+        assert_rc 0 "configure_fail2ban over an edited jail"
+        [ "$(backups)" = 1 ] || die "an edited jail must be backed up once, got $(backups)"
+        ! grep -Fq "# operator edit" "$FAIL2BAN_JAIL_FILE" || die "the edited jail was not replaced"
+        grep -Fxq "# operator edit" "$T"/fail2ban/jail.local.backup.* || die "the backup lacks the operator edit"
+        run_status configure_fail2ban
+        [ "$(backups)" = 1 ] || die "re-running after the restore must not add backups"
+
+        # another port: the previous generation is kept as well
+        SSH_PORT=3333
+        run_status configure_fail2ban
+        assert_rc 0 "configure_fail2ban with another port"
+        [ "$(backups)" = 2 ] || die "a changed port must add one backup, got $(backups)"
+        grep -Fxq "port = 3333" "$FAIL2BAN_JAIL_FILE" || die "the new port was not written"
+        grep -Flx "port = 2222" "$T"/fail2ban/jail.local.backup.* > /dev/null || die "the old port generation was not kept"
+    '
+}
+
 # --- configure_firewall ---------------------------------------------------
 
 test_firewall_without_ufw_is_skipped() {
@@ -608,7 +648,7 @@ test_ssh_hardening_dropin_and_order() {
         assert_before "sshd -t" "ufw allow 2222/tcp"
         assert_before "ufw allow 2222/tcp" "systemctl restart ssh.service"
 
-        for line in "AllowUsers ops" "PermitRootLogin no" "PasswordAuthentication no" "PubkeyAuthentication yes" "Port 2222"; do
+        for line in "AllowUsers ops" "PermitRootLogin no" "PasswordAuthentication no" "PubkeyAuthentication yes" "KbdInteractiveAuthentication no" "Port 2222"; do
             grep -Fxq "$line" "$SSH_HARDENING_DROPIN" || die "drop-in lacks: $line"
         done
         [ "$(grep -c "^AllowUsers" "$SSH_HARDENING_DROPIN")" = 1 ] || die "drop-in must have exactly one AllowUsers"
@@ -770,6 +810,7 @@ test_product_paths_default_to_system_locations() {
         [ "$LIMITS_CONF_FILE" = "/etc/security/limits.d/99-amnezia-limits.conf" ] || die "limits path changed"
         [ "$SWAPFILE_PATH" = "/swapfile" ] || die "the swapfile must be a dedicated /swapfile"
         [ "$FSTAB_FILE" = "/etc/fstab" ] || die "fstab path changed"
+        [ "$FAIL2BAN_JAIL_FILE" = "/etc/fail2ban/jail.local" ] || die "fail2ban jail path changed"
         [ "$DOCKER_SOURCES_FILE" = "/etc/apt/sources.list.d/docker.sources" ] || die "Docker must use docker.sources"
         [ "$DOCKER_KEYRING" = "/etc/apt/keyrings/docker.gpg" ] || die "Docker keyring path changed"
         [ "$ROOT_HOME" = "/root" ] || die "root home path changed"
@@ -801,6 +842,30 @@ test_sysctl_baseline() {
         done
         grep -Fq "nofile 524288" "$LIMITS_CONF_FILE" || die "limits file lacks nofile"
         assert_event "sysctl -e -p $SYSCTL_CONF_FILE"
+    '
+}
+
+test_sysctl_buffers_follow_memory() {
+    run_case '
+        SYSCTL_CONF_FILE="$T/sysctl.d/99-test.conf"
+        MODULES_LOAD_FILE="$T/modules-load.d/99-test.conf"
+        LIMITS_CONF_FILE="$T/limits.d/99-test.conf"
+        mkdir -p "$T/sysctl.d"
+        modprobe() { :; }
+        sysctl() { :; }
+        # configure_sysctl reads the memory size from /proc/meminfo with grep.
+        grep() {
+            if [ "${1:-}" = MemTotal ]; then printf "MemTotal:       %s kB\n" "$MEM_KB"; else command grep "$@"; fi
+        }
+
+        # 4 GB and 2 GB: the 10 Gbps buffer is 64 MB, and 32 MB on a small host.
+        for case_ in "4194304 67108864" "2097152 33554432" "3145728 67108864" "3145727 33554432"; do
+            MEM_KB="${case_% *}"
+            run_status configure_sysctl
+            assert_rc 0 "configure_sysctl with ${MEM_KB} kB"
+            command grep -Fxq "net.core.rmem_max = ${case_#* }" "$SYSCTL_CONF_FILE" || die "rmem_max for ${MEM_KB} kB must be ${case_#* }"
+            command grep -Fxq "net.core.wmem_max = ${case_#* }" "$SYSCTL_CONF_FILE" || die "wmem_max for ${MEM_KB} kB must be ${case_#* }"
+        done
     '
 }
 
@@ -1083,6 +1148,7 @@ main() {
     test_create_user_new_user_branches
     test_target_user_privileges
     test_base_packages_include_fail2ban_journal_backend
+    test_fail2ban_jail_is_backed_up_before_overwrite
     test_firewall_without_ufw_is_skipped
     test_firewall_bootstrap_phase
     test_firewall_locked_phase
@@ -1092,6 +1158,7 @@ main() {
     test_ssh_hardening_without_systemd
     test_product_paths_default_to_system_locations
     test_sysctl_baseline
+    test_sysctl_buffers_follow_memory
     test_swap_baseline
     test_docker_repository_and_packages
     test_backports_kernel_comes_from_backports

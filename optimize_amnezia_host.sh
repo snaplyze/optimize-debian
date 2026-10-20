@@ -346,6 +346,7 @@ SYSCTL_CONF_FILE="/etc/sysctl.d/99-amnezia-host.conf"
 MODULES_LOAD_FILE="/etc/modules-load.d/99-amnezia-host.conf"
 LIMITS_CONF_FILE="/etc/security/limits.d/99-amnezia-limits.conf"
 SWAPFILE_PATH="/swapfile"
+FAIL2BAN_JAIL_FILE="/etc/fail2ban/jail.local"
 FSTAB_FILE="/etc/fstab"
 DOCKER_KEYRING="/etc/apt/keyrings/docker.gpg"
 DOCKER_SOURCES_FILE="/etc/apt/sources.list.d/docker.sources"
@@ -1365,10 +1366,8 @@ configure_firewall() {
     log "Firewall baseline applied"
 }
 
-configure_fail2ban() {
-    section "Fail2Ban for SSH"
-
-    cat > /etc/fail2ban/jail.local <<FAIL2BAN_EOF
+render_fail2ban_jail() {
+    cat <<FAIL2BAN_EOF
 [DEFAULT]
 bantime = 3600
 findtime = 600
@@ -1381,6 +1380,25 @@ port = ${SSH_PORT}
 maxretry = 3
 bantime = 7200
 FAIL2BAN_EOF
+}
+
+# Writes the jail file; an existing file with different content is copied to
+# <file>.backup.<timestamp> first, and a file that is already current is left alone.
+configure_fail2ban() {
+    local backup
+
+    section "Fail2Ban for SSH"
+
+    if [ -e "$FAIL2BAN_JAIL_FILE" ] && cmp -s "$FAIL2BAN_JAIL_FILE" <(render_fail2ban_jail); then
+        log "Fail2Ban jail already up to date"
+    else
+        if [ -e "$FAIL2BAN_JAIL_FILE" ]; then
+            backup="${FAIL2BAN_JAIL_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+            cp -p "$FAIL2BAN_JAIL_FILE" "$backup"
+            log "Existing Fail2Ban jail saved to $backup"
+        fi
+        render_fail2ban_jail > "$FAIL2BAN_JAIL_FILE"
+    fi
 
     if systemd_system_available; then
         service_unit_enable_now fail2ban.service || service_unit_start fail2ban.service || true
