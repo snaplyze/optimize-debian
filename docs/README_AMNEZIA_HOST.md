@@ -64,31 +64,49 @@ Non-Debian и Debian 11 не поддерживаются.
 
 ## Использование
 
-### Быстрый запуск (bash + curl)
+### Целевой пользователь
+
+Скрипт оставляет SSH-доступ только одному операторскому пользователю (`AllowUsers`), выдаёт ему sudo без пароля и добавляет в группу `docker`. Кто это будет:
+
+- `--user <имя>` — явно заданный пользователь (`root` не допускается: при `PermitRootLogin no` он остался бы без входа);
+- без `--user` — пользователь, запустивший скрипт через `sudo` (`SUDO_USER`), например `sudo ./optimize_amnezia_host.sh --yes`;
+- запуск от root без `sudo` (например, `bash <(curl ...)` под root) без `--user` останавливается с ошибкой: молчаливого значения по умолчанию нет.
+
+Если скрипт запустил не целевой пользователь (`SUDO_USER`, а без `sudo` — пользователь входа, в том числе root), скрипт предупредит, что после перезапуска SSH эта учётная запись потеряет вход по SSH (`AllowUsers` пускает только целевого пользователя): в интерактивном режиме попросит подтверждение, с `--yes` только выведет предупреждение. Перед запуском проверь, что у целевого пользователя есть рабочий ключ.
+
+В примерах ниже имя пользователя берётся из переменной `OPERATOR`. Задай её один раз (замени `ops` на своё имя) в той же сессии оболочки, где запускаешь команды; там, где запуск идёт через `sudo` обычным пользователем, `--user` можно не указывать.
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user snaplyze --yes
+OPERATOR=ops
+```
+
+### Быстрый запуск (bash + curl, под root)
+
+```bash
+bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user "$OPERATOR" --yes
 ```
 
 ### Рекомендуемый режим: host baseline + Docker CE
 
 ```bash
-sudo ./optimize_amnezia_host.sh --user snaplyze --yes
+sudo ./optimize_amnezia_host.sh --yes
 ```
+
+Под root без `sudo` добавь `--user "$OPERATOR"`.
 
 Этот режим:
 - создаёт и включает swapfile **2G** (если активного swap ещё нет)
 - ставит Docker CE из официального репозитория
 - включает Docker service
-- добавляет `snaplyze` в **sudo group**
-- включает passwordless sudo для `snaplyze` и `root` (`/etc/sudoers.d/snaplyze`, `/etc/sudoers.d/root`) — в любом запуске, не только с `--create-user`
-- добавляет `snaplyze` в группу `docker`
+- добавляет целевого пользователя в **sudo group**
+- включает passwordless sudo для целевого пользователя и `root` (`/etc/sudoers.d/<имя>`, `/etc/sudoers.d/root`) — в любом запуске, не только с `--create-user`
+- добавляет целевого пользователя в группу `docker`
 - не трогает Docker daemon tuning
 
 ### Если пользователя ещё нет и его нужно создать сразу
 
 ```bash
-sudo ./optimize_amnezia_host.sh --user snaplyze --create-user --yes
+sudo ./optimize_amnezia_host.sh --user "$OPERATOR" --create-user --yes
 ```
 
 Что делает `--create-user`:
@@ -101,11 +119,11 @@ sudo ./optimize_amnezia_host.sh --user snaplyze --create-user --yes
 Если invoking `sudo` user не имеет `authorized_keys`, используй один из явных вариантов:
 
 ```bash
-sudo ./optimize_amnezia_host.sh --user snaplyze --create-user \
+sudo ./optimize_amnezia_host.sh --user "$OPERATOR" --create-user \
   --ssh-public-key 'ssh-ed25519 AAAA... your-key' --yes
 
-sudo ./optimize_amnezia_host.sh --user snaplyze --create-user \
-  --ssh-public-key-file /root/snaplyze.pub --yes
+sudo ./optimize_amnezia_host.sh --user "$OPERATOR" --create-user \
+  --ssh-public-key-file "/root/$OPERATOR.pub" --yes
 ```
 
 Если `--user` указывает на уже существующего пользователя, перед SSH hardening у него должен быть непустой `authorized_keys` или нужно явно передать `--ssh-public-key` / `--ssh-public-key-file`. Скрипт не должен закрывать парольный SSH без рабочего ключа.
@@ -113,19 +131,19 @@ sudo ./optimize_amnezia_host.sh --user snaplyze --create-user \
 ### Если Docker должен ставить сам Amnezia app
 
 ```bash
-sudo ./optimize_amnezia_host.sh --user snaplyze --skip-docker --yes
+sudo ./optimize_amnezia_host.sh --skip-docker --yes
 ```
 
 ### Если swap уже настроен вручную и менять его не нужно
 
 ```bash
-sudo ./optimize_amnezia_host.sh --user snaplyze --skip-swap --yes
+sudo ./optimize_amnezia_host.sh --skip-swap --yes
 ```
 
 ### После фиксации AmneziaWG на 8443/udp
 
 ```bash
-sudo ./optimize_amnezia_host.sh --user snaplyze --firewall-phase locked --yes
+sudo ./optimize_amnezia_host.sh --firewall-phase locked --yes
 ```
 
 ---
@@ -133,7 +151,7 @@ sudo ./optimize_amnezia_host.sh --user snaplyze --firewall-phase locked --yes
 ## Опции
 
 ```text
---user <name>             существующий операторский пользователь (по умолчанию: snaplyze)
+--user <name>             существующий операторский пользователь (по умолчанию: пользователь, запустивший sudo; от root без sudo обязателен)
 --create-user             создать пользователя, если он ещё не существует
 --ssh-public-key <key>    публичный ключ для нового пользователя
 --ssh-public-key-file <p> файл с публичными ключами для нового пользователя
@@ -149,6 +167,8 @@ sudo ./optimize_amnezia_host.sh --user snaplyze --firewall-phase locked --yes
 --yes                     не задавать интерактивный вопрос
 --help                    показать help
 ```
+
+При смене `--ssh-port` скрипт записывает drop-in, проверяет конфигурацию (`sshd -t`), открывает новый порт в уже активном UFW и только потом перезапускает SSH. Если `sshd -t` не прошёл, скрипт возвращает прежний drop-in и останавливается — SSH не перезапускается, правило UFW не добавляется. Если не удался перезапуск SSH (например, порт занят), скрипт возвращает прежний drop-in, удаляет добавленное им правило UFW, перезапускает SSH ещё раз и останавливается с ошибкой, в которой указан путь к drop-in. `--ssh-port` не может совпадать с `--xray-port` (оба TCP). Без systemd SSH перезапустить нельзя, поэтому смена порта в этом случае отклоняется до каких-либо изменений; без смены порта drop-in записывается, а SSH нужно перезапустить вручную.
 
 ---
 
@@ -304,7 +324,7 @@ sudo sshd -t
 sudo systemctl status ssh fail2ban docker --no-pager
 sudo ufw status verbose
 sysctl net.ipv4.ip_forward net.ipv4.tcp_congestion_control net.core.default_qdisc
-id snaplyze
+id "$OPERATOR"
 ```
 
 Если Docker ставился скриптом, перелогинься перед использованием Docker без sudo.

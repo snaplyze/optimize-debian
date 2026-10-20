@@ -123,7 +123,19 @@ EOF
         return 0
     }
 fi
-TARGET_USER="snaplyze"
+TARGET_USER=""
+ADDUSER_BIN="/usr/sbin/adduser"
+SSH_HARDENING_DROPIN="/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf"
+UFW_DEFAULTS_FILE="/etc/default/ufw"
+SYSCTL_CONF_FILE="/etc/sysctl.d/99-amnezia-host.conf"
+MODULES_LOAD_FILE="/etc/modules-load.d/99-amnezia-host.conf"
+LIMITS_CONF_FILE="/etc/security/limits.d/99-amnezia-limits.conf"
+SWAPFILE_PATH="/swapfile"
+FSTAB_FILE="/etc/fstab"
+DOCKER_KEYRING="/etc/apt/keyrings/docker.gpg"
+DOCKER_SOURCES_FILE="/etc/apt/sources.list.d/docker.sources"
+ROOT_HOME="/root"
+SSH_PORT_RULE_ADDED=false
 INSTALL_DOCKER=true
 INSTALL_FISH=true
 INSTALL_KERNEL_BACKPORTS=false
@@ -233,7 +245,8 @@ Minimal Debian 12/13 host baseline for AmneziaVPN self-hosted deployment via the
 The script prepares the host only; it does not install AmneziaWG, XRay, or any other protocol containers.
 
 Options:
-  --user <name>               Existing sudo-capable user to keep as the operator (default: snaplyze)
+  --user <name>               Existing sudo-capable user to keep as the operator
+                              (default: the invoking sudo user, SUDO_USER; required when run as root without sudo)
   --create-user               Create the target user when it does not already exist
   --ssh-public-key <key>      Public key to add when creating a user without an invoking sudo-user key source
   --ssh-public-key-file <p>   File with one or more public keys to merge into the created user's authorized_keys
@@ -253,6 +266,10 @@ Firewall phases:
   bootstrap  Open SSH, 443/tcp, and temporary all-UDP ingress to avoid blocking first-time
              AmneziaWG installation before the app pins a final port.
   locked     Open SSH, 443/tcp, and 8443/udp only after AmneziaWG has been pinned to 8443/udp.
+
+SSH access:
+  SSH hardening restricts login to the target user (AllowUsers) and disables root login.
+  Make sure the target user is the account you log in with, or has working SSH keys.
 
 User creation notes:
   When --create-user is used, the script prefers authorized_keys from the invoking sudo user
@@ -460,7 +477,7 @@ parse_args() {
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --user)
-                [ "$#" -ge 2 ] || { error "--user requires a value"; exit 1; }
+                [ "$#" -ge 2 ] && [ -n "$2" ] || { error "--user requires a value"; exit 1; }
                 TARGET_USER="$2"
                 shift 2
                 ;;
@@ -535,6 +552,11 @@ parse_args() {
         esac
     done
 
+    if [ "$TARGET_USER" = "root" ]; then
+        error "root cannot be the target user: SSH hardening disables root login (PermitRootLogin no) and would lock you out. Pass a regular user with --user"
+        exit 1
+    fi
+
     if ! validate_firewall_phase "$FIREWALL_PHASE"; then
         error "Unsupported firewall phase: ${FIREWALL_PHASE}. Use bootstrap or locked."
         exit 1
@@ -560,10 +582,31 @@ parse_args() {
         exit 1
     fi
 
+    if [ "$SSH_PORT" = "$XRAY_PORT" ]; then
+        error "SSH port and XRay port must differ (both are TCP): ${SSH_PORT}"
+        exit 1
+    fi
+
     if [ -n "$SSH_PUBLIC_KEY_FILE" ] && [ ! -f "$SSH_PUBLIC_KEY_FILE" ]; then
         error "SSH public key file not found: ${SSH_PUBLIC_KEY_FILE}"
         exit 1
     fi
+}
+
+# Without --user the operator is the regular user who invoked sudo. Kept apart
+# from parse_args so that the root check in main reports a missing root first.
+resolve_target_user() {
+    if [ -n "$TARGET_USER" ]; then
+        return 0
+    fi
+
+    if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+        TARGET_USER="$SUDO_USER"
+        return 0
+    fi
+
+    error "Target user is not set: run through sudo as a regular user or pass --user <name>"
+    exit 1
 }
 
 confirm_execution() {
@@ -591,6 +634,46 @@ confirm_execution() {
 
     local reply
     read -r reply
+    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+        warn "Aborted by user"
+        exit 0
+    fi
+}
+
+current_login_user() {
+    if [ -n "${SUDO_USER:-}" ]; then
+        printf '%s\n' "$SUDO_USER"
+        return 0
+    fi
+
+    logname 2>/dev/null
+}
+
+warn_if_login_user_not_target_user() {
+    local login_user
+    local reply
+
+    # AllowUsers locks every other account out of SSH, whether or not this run
+    # itself came in over SSH (sudo usually drops SSH_CONNECTION anyway).
+    login_user="$(current_login_user || true)"
+    if [ -z "$login_user" ]; then
+        warn "Cannot determine the logged-in user; make sure ${TARGET_USER} can log in over SSH with a key"
+        return 0
+    fi
+
+    if [ "$login_user" = "$TARGET_USER" ]; then
+        return 0
+    fi
+
+    warn "You are logged in as ${login_user}, but SSH hardening allows only ${TARGET_USER} (AllowUsers) and disables root login"
+    warn "After the SSH service restarts, ${login_user} will not be able to log in over SSH"
+
+    if $ASSUME_YES; then
+        return 0
+    fi
+
+    printf 'Continue anyway? [y/N]: '
+    read -r reply || reply=""
     if [[ ! "$reply" =~ ^[Yy]$ ]]; then
         warn "Aborted by user"
         exit 0
@@ -715,7 +798,7 @@ create_target_user_if_needed() {
         exit 1
     fi
 
-    /usr/sbin/adduser --gecos "" --disabled-password "$TARGET_USER"
+    "$ADDUSER_BIN" --gecos "" --disabled-password "$TARGET_USER"
     user_home="$(user_home_for "$TARGET_USER")"
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_USER" "$user_home/.ssh"
     if [ -n "$SSH_PUBLIC_KEY" ]; then
@@ -805,25 +888,25 @@ configure_swap() {
         return 0
     fi
 
-    if [ -e /swapfile ]; then
-        warn "/swapfile already exists but no active swap was detected; leaving it unchanged to avoid clobbering data"
-        warn "Review /swapfile manually if you still want a ${SWAP_SIZE_GB}G swapfile"
+    if [ -e "$SWAPFILE_PATH" ]; then
+        warn "${SWAPFILE_PATH} already exists but no active swap was detected; leaving it unchanged to avoid clobbering data"
+        warn "Review ${SWAPFILE_PATH} manually if you still want a ${SWAP_SIZE_GB}G swapfile"
         return 0
     fi
 
-    progress "Creating ${SWAP_SIZE_GB}G swapfile at /swapfile"
+    progress "Creating ${SWAP_SIZE_GB}G swapfile at ${SWAPFILE_PATH}"
     if command -v fallocate >/dev/null 2>&1; then
-        fallocate -l "${SWAP_SIZE_GB}G" /swapfile
+        fallocate -l "${SWAP_SIZE_GB}G" "$SWAPFILE_PATH"
     else
-        dd if=/dev/zero of=/swapfile bs=1M count="${swap_size_mib}" status=progress
+        dd if=/dev/zero of="$SWAPFILE_PATH" bs=1M count="${swap_size_mib}" status=progress
     fi
 
-    chmod 600 /swapfile
-    mkswap /swapfile >/dev/null
-    swapon /swapfile
+    chmod 600 "$SWAPFILE_PATH"
+    mkswap "$SWAPFILE_PATH" >/dev/null
+    swapon "$SWAPFILE_PATH"
 
-    if ! grep -qE '^[[:space:]]*/swapfile[[:space:]]+none[[:space:]]+swap[[:space:]]' /etc/fstab; then
-        printf '/swapfile none swap sw 0 0\n' >> /etc/fstab
+    if ! grep -qE "^[[:space:]]*${SWAPFILE_PATH}[[:space:]]+none[[:space:]]+swap[[:space:]]" "$FSTAB_FILE"; then
+        printf '%s none swap sw 0 0\n' "$SWAPFILE_PATH" >> "$FSTAB_FILE"
     fi
 
     log "Swapfile enabled (${SWAP_SIZE_GB}G)"
@@ -832,16 +915,16 @@ configure_swap() {
 install_docker_ce() {
     section "Docker CE (vanilla host baseline)"
 
-    install -m 0755 -d /etc/apt/keyrings
+    install -m 0755 -d "$(dirname "$DOCKER_KEYRING")"
 
-    if [ ! -f /etc/apt/keyrings/docker.gpg ]; then
+    if [ ! -f "$DOCKER_KEYRING" ]; then
         progress "Installing Docker APT key"
-        curl -fsSL "https://download.docker.com/linux/${ID}/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        chmod a+r /etc/apt/keyrings/docker.gpg
+        curl -fsSL "https://download.docker.com/linux/${ID}/gpg" | gpg --dearmor -o "$DOCKER_KEYRING"
+        chmod a+r "$DOCKER_KEYRING"
     fi
     DOCKER_ARCH="$(dpkg --print-architecture)"
 
-    common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "/etc/apt/keyrings/docker.gpg" > /etc/apt/sources.list.d/docker.sources
+    common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "$DOCKER_KEYRING" > "$DOCKER_SOURCES_FILE"
 
     run_apt_update_with_diagnostics "Docker repository refresh"
     safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
@@ -962,14 +1045,14 @@ BASH_FISH_EOF
         log "Fish + Starship (nerd-font-symbols) configured for ${TARGET_USER}"
     fi
 
-    # Also configure for root if /root exists
-    if [ -d "/root" ]; then
-        install -d -m 0755 /root/.config/fish
+    # Also configure for root if its home exists
+    if [ -d "$ROOT_HOME" ]; then
+        install -d -m 0755 "$ROOT_HOME/.config/fish"
         if command -v starship >/dev/null 2>&1; then
-            starship preset nerd-font-symbols > /root/.config/starship.toml 2>/dev/null || true
-            chmod 644 /root/.config/starship.toml 2>/dev/null || true
+            starship preset nerd-font-symbols > "$ROOT_HOME/.config/starship.toml" 2>/dev/null || true
+            chmod 644 "$ROOT_HOME/.config/starship.toml" 2>/dev/null || true
         fi
-        cat > /root/.config/fish/config.fish <<'FISH_ROOT_EOF'
+        cat > "$ROOT_HOME/.config/fish/config.fish" <<'FISH_ROOT_EOF'
 set -g fish_greeting ""
 
 if status is-interactive
@@ -978,9 +1061,9 @@ if status is-interactive
     end
 end
 FISH_ROOT_EOF
-        chmod 644 /root/.config/fish/config.fish
-        if ! grep -q "exec fish" /root/.bashrc 2>/dev/null; then
-            cat >> /root/.bashrc <<'BASH_FISH_ROOT_EOF'
+        chmod 644 "$ROOT_HOME/.config/fish/config.fish"
+        if ! grep -q "exec fish" "$ROOT_HOME/.bashrc" 2>/dev/null; then
+            cat >> "$ROOT_HOME/.bashrc" <<'BASH_FISH_ROOT_EOF'
 
 # Auto-switch to Fish for interactive sessions only
 if [[ $- == *i* ]] && [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && command -v fish >/dev/null 2>&1; then
@@ -995,8 +1078,8 @@ configure_sysctl() {
     section "Kernel modules and 10 Gbps sysctl baseline"
 
     # Persist and load required kernel modules for VPN and BBR
-    install -d -m 0755 /etc/modules-load.d
-    cat > /etc/modules-load.d/99-amnezia-host.conf <<'MODULES_EOF'
+    install -d -m 0755 "$(dirname "$MODULES_LOAD_FILE")"
+    cat > "$MODULES_LOAD_FILE" <<'MODULES_EOF'
 tcp_bbr
 tun
 wireguard
@@ -1017,7 +1100,7 @@ MODULES_EOF
         max_buffer_bytes=33554432
     fi
 
-    cat > /etc/sysctl.d/99-amnezia-host.conf <<SYSCTL_EOF
+    cat > "$SYSCTL_CONF_FILE" <<SYSCTL_EOF
 # 10 Gbps host tuning for AmneziaVPN app-managed deployments
 # Network Congestion Control (BBR + FQ pacing)
 net.core.default_qdisc = fq
@@ -1074,8 +1157,8 @@ net.ipv4.conf.default.send_redirects = 0
 vm.swappiness = 10
 SYSCTL_EOF
 
-    install -d -m 0755 /etc/security/limits.d
-    cat > /etc/security/limits.d/99-amnezia-limits.conf <<'LIMITS_EOF'
+    install -d -m 0755 "$(dirname "$LIMITS_CONF_FILE")"
+    cat > "$LIMITS_CONF_FILE" <<'LIMITS_EOF'
 # File descriptor and process limits for 10G VPN concurrency
 * soft nofile 524288
 * hard nofile 524288
@@ -1087,7 +1170,7 @@ root soft memlock unlimited
 root hard memlock unlimited
 LIMITS_EOF
 
-    sysctl -e -p /etc/sysctl.d/99-amnezia-host.conf >/dev/null 2>&1 || true
+    sysctl -e -p "$SYSCTL_CONF_FILE" >/dev/null 2>&1 || true
     log "10 Gbps sysctl and system limits baseline applied"
 }
 
@@ -1100,8 +1183,8 @@ configure_firewall() {
     fi
 
     # Ensure UFW forwards traffic between VPN and physical interfaces
-    if [ -f /etc/default/ufw ]; then
-        sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+    if [ -f "$UFW_DEFAULTS_FILE" ]; then
+        sed -i 's/^DEFAULT_FORWARD_POLICY=.*/DEFAULT_FORWARD_POLICY="ACCEPT"/' "$UFW_DEFAULTS_FILE"
     fi
 
     ufw default deny incoming >/dev/null
@@ -1149,12 +1232,8 @@ FAIL2BAN_EOF
     log "Fail2Ban configured for SSH (port ${SSH_PORT})"
 }
 
-configure_ssh_hardening() {
-    section "SSH hardening"
-
-    install -d -m 0755 /etc/ssh/sshd_config.d
-
-    cat > /etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf <<SSH_EOF
+render_ssh_hardening_dropin() {
+    cat <<SSH_EOF
 # Minimal Amnezia host SSH baseline
 PermitRootLogin no
 PasswordAuthentication no
@@ -1170,16 +1249,139 @@ MaxAuthTries 3
 AllowUsers ${TARGET_USER}
 Port ${SSH_PORT}
 SSH_EOF
+}
 
-    if sshd -t; then
-        if systemd_system_available; then
-            systemctl restart ssh.service >/dev/null 2>&1 || systemctl restart sshd.service >/dev/null 2>&1 || true
-        fi
-        log "SSH hardening drop-in applied (port ${SSH_PORT})"
+ufw_is_active() {
+    local status
+
+    command -v ufw >/dev/null 2>&1 || return 1
+    status="$(ufw status 2>/dev/null || true)"
+    grep -q '^Status: active' <<< "$status"
+}
+
+# Open the new SSH port in an active UFW before sshd moves to it: sshd restarts
+# before configure_firewall runs, and a closed port would cut off new sessions.
+allow_ssh_port_in_active_firewall() {
+    ufw_is_active || return 0
+
+    # A rule that already exists is the operator's: it is neither added nor removed here.
+    if ufw status 2>/dev/null | grep -Eq "^${SSH_PORT}/tcp[[:space:]]+ALLOW"; then
+        return 0
+    fi
+
+    if ! ufw allow "${SSH_PORT}/tcp" >/dev/null; then
+        error "Could not allow ${SSH_PORT}/tcp in UFW; not restarting the SSH service to avoid blocking SSH access"
+        return 1
+    fi
+    SSH_PORT_RULE_ADDED=true
+    log "SSH port ${SSH_PORT}/tcp allowed in the active firewall before the SSH service restart"
+}
+
+remove_added_ssh_port_rule() {
+    $SSH_PORT_RULE_ADDED || return 0
+
+    # The port may belong to another service (the reason the restart failed): do not leave it open.
+    if ufw delete allow "${SSH_PORT}/tcp" >/dev/null; then
+        log "Removed the UFW rule for ${SSH_PORT}/tcp added for the failed SSH change"
     else
-        error "SSH configuration test failed"
+        warn "Could not remove the UFW rule for ${SSH_PORT}/tcp; remove it with: ufw delete allow ${SSH_PORT}/tcp"
+    fi
+    SSH_PORT_RULE_ADDED=false
+}
+
+# Restart the SSH unit; on failure print the output of both attempts.
+restart_ssh_service() {
+    local ssh_output
+    local sshd_output
+
+    if ssh_output="$(systemctl restart ssh.service 2>&1)"; then
+        return 0
+    fi
+    if sshd_output="$(systemctl restart sshd.service 2>&1)"; then
+        return 0
+    fi
+
+    printf 'systemctl restart ssh.service: %s\n' "$ssh_output" >&2
+    printf 'systemctl restart sshd.service: %s\n' "$sshd_output" >&2
+    return 1
+}
+
+# Port sshd listens on now (22 when it cannot be read).
+current_ssh_port() {
+    local port
+
+    port="$(sshd -T 2>/dev/null | awk '$1 == "port" { print $2; exit }' || true)"
+    printf '%s\n' "${port:-22}"
+}
+
+# Put the previous drop-in back (or remove ours when there was none).
+revert_ssh_hardening_dropin() {
+    local backup="${1:-}"
+
+    if [ -n "$backup" ]; then
+        cp -p "$backup" "$SSH_HARDENING_DROPIN"
+    else
+        rm -f "$SSH_HARDENING_DROPIN"
+    fi
+}
+
+configure_ssh_hardening() {
+    local backup=""
+
+    section "SSH hardening"
+
+    # Without systemd sshd is not restarted, so it keeps its old port while
+    # configure_firewall opens only the new one.
+    if ! systemd_system_available && [ "$SSH_PORT" != "$(current_ssh_port)" ]; then
+        error "systemd is not available, so the SSH service cannot be restarted to move it to port ${SSH_PORT}"
+        error "Keep the current SSH port, or restart the SSH service yourself and re-run the script"
         exit 1
     fi
+
+    install -d -m 0755 "$(dirname "$SSH_HARDENING_DROPIN")"
+
+    if [ -e "$SSH_HARDENING_DROPIN" ]; then
+        backup="$(mktemp)"
+        cp -p "$SSH_HARDENING_DROPIN" "$backup"
+    fi
+
+    render_ssh_hardening_dropin > "$SSH_HARDENING_DROPIN"
+
+    if ! sshd -t; then
+        error "SSH configuration test failed; reverting the SSH hardening drop-in ${SSH_HARDENING_DROPIN}"
+        revert_ssh_hardening_dropin "$backup"
+        rm -f "$backup"
+        exit 1
+    fi
+
+    if ! allow_ssh_port_in_active_firewall; then
+        revert_ssh_hardening_dropin "$backup"
+        rm -f "$backup"
+        exit 1
+    fi
+
+    if ! systemd_system_available; then
+        rm -f "$backup"
+        warn "systemd is not available; restart the SSH service manually to apply the drop-in"
+        log "SSH hardening drop-in written (port ${SSH_PORT})"
+        return 0
+    fi
+
+    if ! restart_ssh_service; then
+        error "Failed to restart the SSH service with the new configuration (port ${SSH_PORT}); the port may be in use"
+        revert_ssh_hardening_dropin "$backup"
+        remove_added_ssh_port_rule
+        if restart_ssh_service; then
+            error "Previous SSH drop-in restored (${SSH_HARDENING_DROPIN}) and the SSH service is running again; the new settings are not applied"
+        else
+            error "The SSH service still does not start after restoring ${SSH_HARDENING_DROPIN}; check 'systemctl status ssh' and 'journalctl -u ssh' on the console"
+        fi
+        rm -f "$backup"
+        exit 1
+    fi
+
+    rm -f "$backup"
+    log "SSH hardening drop-in applied (port ${SSH_PORT})"
 }
 
 print_summary() {
@@ -1211,6 +1413,8 @@ main() {
         exit 1
     fi
 
+    resolve_target_user
+
     if [ -r /etc/os-release ]; then
         # shellcheck disable=SC1091
         . /etc/os-release
@@ -1222,6 +1426,7 @@ main() {
     require_supported_debian_release
     validate_target_user
     confirm_execution
+    warn_if_login_user_not_target_user
 
     install_base_packages
     configure_locales
