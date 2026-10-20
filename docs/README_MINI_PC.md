@@ -84,7 +84,7 @@ sudo ./optimize_mini_pc.sh
 
 1.  **System Update:** Обновление пакетов и установка базы (`curl`, `git`, `htop`, `vim`).
 2.  **Locales & Timezone:** При включённом шаге генерируются обе локали `ru_RU.UTF-8` и `en_US.UTF-8`; меню выбирает язык по умолчанию через штатный `update-locale` Debian 12/13, без постоянного `LC_ALL`. Настраиваются часовой пояс и time sync (с проверкой существующего NTP daemon и fallback на `systemd-timesyncd`). [Исправление ошибки локали на уже настроенном сервере](README_AMNEZIA_HOST.md#ошибка-setlocale-при-входе-по-ssh).
-3.  **User & Security:** Создание sudo-пользователя (атомарная валидация `visudo`), настройка SSH (ключи), UFW (фаервол) и Fail2Ban (`backend = systemd`).
+3.  **User & Security:** Создание sudo-пользователя (атомарная валидация `visudo`) с sudo без пароля (`NOPASSWD:ALL` для пользователя и `root` в `/etc/sudoers.d/`), настройка SSH (ключи), UFW (фаервол) и Fail2Ban (`backend = systemd`).
 4.  **Kernel & Hardware:** Установка официального ядра Debian Backports и драйверов Intel GPU.
 5.  **Storage Optimization:** Настройка TRIM и планировщиков ввода/вывода.
 6.  **Docker Stack:** Установка Docker CE + Docker Compose через deb822 source с `Architectures: $(dpkg --print-architecture)`.
@@ -107,11 +107,12 @@ sudo ./optimize_mini_pc.sh
 - Статус Docker контейнеров
 - Подсказка по мониторингу GPU
 
-### `intel_gpu_top` (алиас `gpu`)
+### `intel_gpu_top`
 Реальный мониторинг загрузки видеоядра. Полезно для проверки работы транскодирования в Plex/Jellyfin.
 ```bash
 sudo intel_gpu_top
 ```
+В Fish есть алиас `gpuinfo`: он запускает `vainfo`, а если `vainfo` завершился с ошибкой, — `intel_gpu_top`.
 
 ### `minipc-cleanup.sh`
 Скрипт очистки системы (логи, кэш apt, старые ядра). Добавляется в еженедельный cron.

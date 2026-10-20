@@ -81,6 +81,7 @@ sudo ./optimize_amnezia_host.sh --user snaplyze --yes
 - ставит Docker CE из официального репозитория
 - включает Docker service
 - добавляет `snaplyze` в **sudo group**
+- включает passwordless sudo для `snaplyze` и `root` (`/etc/sudoers.d/snaplyze`, `/etc/sudoers.d/root`) — в любом запуске, не только с `--create-user`
 - добавляет `snaplyze` в группу `docker`
 - не трогает Docker daemon tuning
 
