@@ -370,6 +370,175 @@ if ! declare -F common_apt_get >/dev/null; then
     }
 fi
 
+if ! declare -F common_enrich_apt_components >/dev/null; then
+    # common_enrich_apt_components <file>: adds contrib, non-free and non-free-firmware to every
+    # source in <file> that has the main component: the deb and deb-src lines of a one-line file,
+    # the Components fields of a deb822 .sources file. The file is rewritten only when a component
+    # is added: through a temporary file in its directory that gets its mode and owner and then
+    # replaces it, so a failed write leaves the source as it was; the next common_apt_update
+    # refreshes the index. Returns 1 when the file cannot be read or rewritten.
+    common_enrich_apt_components() {
+        local f="${1:-}"
+        local format=list
+        local tmp_file line body comment words added changed=0 read_status=0
+
+        [ -f "$f" ] || return 0
+        [[ "$f" == *.sources ]] && format=deb822
+
+        if ! tmp_file="$(mktemp "$(dirname "$f")/.$(basename "$f").XXXXXX")"; then
+            error "Failed to allocate temporary file while updating $f"
+            return 1
+        fi
+
+        while IFS= read -r line || [ -n "$line" ]; do
+            body="$line"
+            comment=""
+            if [ "$format" = list ] && [[ "$line" == *"#"* ]]; then
+                body="${line%%#*}"
+                comment="#${line#*#}"
+            fi
+            if { [ "$format" = list ] && [[ "$body" =~ ^[[:space:]]*deb(-src)?[[:space:]] ]]; } ||
+                { [ "$format" = deb822 ] && [[ "$body" =~ ^[[:space:]]*[Cc]omponents: ]]; }; then
+                words=" ${body//[[:space:]:]/ } "
+                added=""
+                if [[ "$words" == *" main "* ]]; then
+                    [[ "$words" == *" contrib "* ]] || added+=" contrib"
+                    [[ "$words" == *" non-free "* ]] || added+=" non-free"
+                    [[ "$words" == *" non-free-firmware "* ]] || added+=" non-free-firmware"
+                fi
+                if [ -n "$added" ]; then
+                    body="${body%"${body##*[![:space:]]}"}"
+                    line="${body}${added}${comment:+ $comment}"
+                    changed=1
+                fi
+            fi
+            printf '%s\n' "$line"
+        done < "$f" > "$tmp_file" || read_status=1
+        if [ "$read_status" -ne 0 ]; then
+            rm -f "$tmp_file"
+            error "Failed to read APT source file: $f"
+            return 1
+        fi
+
+        if [ "$changed" -eq 0 ]; then
+            rm -f "$tmp_file"
+            return 0
+        fi
+
+        progress "Updating APT source file: $f"
+        if ! chmod --reference="$f" "$tmp_file" || ! chown --reference="$f" "$tmp_file" || ! mv -f "$tmp_file" "$f"; then
+            rm -f "$tmp_file"
+            error "Failed to write updated APT source file: $f"
+            return 1
+        fi
+        common_apt_sources_changed
+    }
+
+    # common_enrich_apt_sources [apt_dir]: common_enrich_apt_components for sources.list and every
+    # .list and .sources file in sources.list.d of <apt_dir> (/etc/apt). Returns 1 when a file could
+    # not be rewritten; the other files are still processed.
+    common_enrich_apt_sources() {
+        local apt_dir="${1:-/etc/apt}"
+        local f status=0
+
+        for f in "$apt_dir/sources.list" "$apt_dir"/sources.list.d/*.list "$apt_dir"/sources.list.d/*.sources; do
+            common_enrich_apt_components "$f" || status=1
+        done
+        return "$status"
+    }
+fi
+
+if ! declare -F common_systemd_running >/dev/null; then
+    # systemd runs as the init system (not in WSL without systemd or in most containers).
+    common_systemd_running() {
+        command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+    }
+
+    # The kernel reports the clock as synchronized. timedatectl names this NTPSynchronized;
+    # it has no SystemClockSynchronized property (Debian 12 and 13).
+    common_system_clock_synchronized() {
+        [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]
+    }
+
+    # common_ensure_time_sync_service: keeps the first installed time-sync service of chrony,
+    # ntpsec, ntp, openntpd and systemd-timesyncd, starting it when it is inactive, and installs
+    # systemd-timesyncd only when none is installed: in Debian these packages conflict, so
+    # installing another one would remove the operator's. Sets COMMON_TIME_SYNC_SERVICE to the
+    # running service without .service. Returns 1 without systemd or when no service runs.
+    common_ensure_time_sync_service() {
+        local unit service=""
+
+        COMMON_TIME_SYNC_SERVICE=""
+        common_systemd_running || return 1
+
+        for unit in chronyd.service chrony.service ntpsec.service ntp.service openntpd.service systemd-timesyncd.service; do
+            if systemctl list-unit-files "$unit" --no-legend >/dev/null 2>&1; then
+                service="$unit"
+                break
+            fi
+        done
+
+        if [ -z "$service" ]; then
+            # The index may not be refreshed yet in this run (an image with empty package lists).
+            common_apt_update "time sync service lookup" || true
+            if ! common_package_available systemd-timesyncd; then
+                warn "No supported NTP service detected and systemd-timesyncd is unavailable"
+                return 1
+            fi
+            log "No NTP service detected. Installing systemd-timesyncd..."
+            if ! common_safe_install systemd-timesyncd; then
+                warn "Failed to install systemd-timesyncd"
+                return 1
+            fi
+            service="systemd-timesyncd.service"
+        else
+            log "Detected NTP service: ${service%.service}"
+        fi
+
+        if ! systemctl is-active "$service" >/dev/null 2>&1; then
+            if ! systemctl enable --now "$service" >/dev/null 2>&1 && ! systemctl start "$service" >/dev/null 2>&1; then
+                warn "Failed to enable or start NTP service: ${service%.service}"
+                return 1
+            fi
+            log "NTP service started: ${service%.service}"
+        fi
+        COMMON_TIME_SYNC_SERVICE="${service%.service}"
+    }
+
+    # common_enable_time_sync: common_ensure_time_sync_service, then `timedatectl set-ntp true`.
+    # Returns 1 without timedatectl or systemd, or when time sync could not be enabled.
+    common_enable_time_sync() {
+        COMMON_TIME_SYNC_SERVICE=""
+        if ! command -v timedatectl >/dev/null 2>&1; then
+            info "timedatectl is unavailable. Install and start chrony, ntpsec, or systemd-timesyncd manually if time sync is required."
+            return 1
+        fi
+        if ! common_systemd_running; then
+            info "systemd is unavailable. Install and start an NTP daemon manually before enabling time synchronization."
+            return 1
+        fi
+
+        common_ensure_time_sync_service || return 1
+
+        if timedatectl set-ntp true 2>/dev/null; then
+            log "NTP synchronization enabled via $COMMON_TIME_SYNC_SERVICE"
+            return 0
+        fi
+
+        if systemctl is-active "$COMMON_TIME_SYNC_SERVICE.service" >/dev/null 2>&1; then
+            if common_system_clock_synchronized; then
+                log "Time sync already operational via $COMMON_TIME_SYNC_SERVICE"
+            else
+                info "Time-sync daemon $COMMON_TIME_SYNC_SERVICE is active even though timedatectl could not control it directly"
+            fi
+            return 0
+        fi
+
+        warn "Could not enable NTP via timedatectl after preparing $COMMON_TIME_SYNC_SERVICE"
+        return 1
+    }
+fi
+
 if ! declare -F tui_detect_backend >/dev/null; then
     : "${GUM:=/usr/local/bin/gum}"
     : "${TUI_GUM_VERSION:=0.17.0}"
@@ -753,181 +922,6 @@ require_supported_debian_release() {
         error "This script supports Debian 12 (Bookworm) and Debian 13 (Trixie). Detected: Debian ${VERSION_ID:-unknown}"
         exit 1
     fi
-}
-
-enrich_apt_components() {
-    local f="$1"
-    local tmp_file
-    local line
-    [ -f "$f" ] || return 0
-
-    tmp_file=$(mktemp)
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            (deb\ *|deb-src\ *|[[:space:]]deb\ *|[[:space:]]deb-src\ *)
-                if [[ " $line " == *" main "* ]]; then
-                    [[ " $line " == *" contrib "* ]] || line="${line} contrib"
-                    [[ " $line " == *" non-free "* ]] || line="${line} non-free"
-                    [[ " $line " == *" non-free-firmware "* ]] || line="${line} non-free-firmware"
-                fi
-                ;;
-        esac
-        printf '%s\n' "$line" >>"$tmp_file"
-    done < "$f"
-
-    cat "$tmp_file" > "$f"
-    rm -f "$tmp_file"
-}
-
-enrich_deb822_components() {
-    local f="$1"
-    [ -f "$f" ] || return 0
-    sed -i -E '/^\s*Components:\s*/ {
-        /contrib/! s/$/ contrib/
-        /non-free([[:space:]]|$)/! s/$/ non-free/
-        /non-free-firmware/! s/$/ non-free-firmware/
-    }' "$f"
-}
-
-enrich_all_apt_sources() {
-    enrich_apt_components "/etc/apt/sources.list"
-
-    local f
-    for f in /etc/apt/sources.list.d/*.list; do
-        if [ -e "$f" ]; then
-            enrich_apt_components "$f"
-        fi
-    done
-
-    for f in /etc/apt/sources.list.d/*.sources; do
-        if [ -e "$f" ]; then
-            enrich_deb822_components "$f"
-        fi
-    done
-}
-
-systemd_system_available() {
-    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
-}
-
-timedatectl_available() {
-    command -v timedatectl >/dev/null 2>&1
-}
-
-system_clock_synchronized() {
-    [ "$(timedatectl show --property=SystemClockSynchronized --value 2>/dev/null)" = "yes" ]
-}
-
-time_sync_candidate_units() {
-    printf '%s\n' \
-        chronyd.service \
-        chrony.service \
-        ntpsec.service \
-        ntp.service \
-        openntpd.service \
-        systemd-timesyncd.service
-}
-
-service_unit_exists() {
-    systemctl list-unit-files "$1" --no-legend >/dev/null 2>&1
-}
-
-service_unit_active() {
-    systemctl is-active "$1" >/dev/null 2>&1
-}
-
-service_unit_enable_now() {
-    systemctl enable --now "$1" >/dev/null 2>&1
-}
-
-service_unit_start() {
-    systemctl start "$1" >/dev/null 2>&1
-}
-
-detect_time_sync_service() {
-    local unit
-    for unit in $(time_sync_candidate_units); do
-        if service_unit_exists "$unit"; then
-            printf '%s\n' "$unit"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-ensure_time_sync_service() {
-    local service
-
-    if ! systemd_system_available; then
-        return 1
-    fi
-
-    service=$(detect_time_sync_service || true)
-    if [ -z "$service" ]; then
-        if ! common_package_available systemd-timesyncd; then
-            warn "No supported NTP service detected and systemd-timesyncd is unavailable"
-            return 1
-        fi
-
-        log "No NTP service detected. Installing systemd-timesyncd..."
-        if ! common_safe_install systemd-timesyncd; then
-            warn "Failed to install systemd-timesyncd"
-            return 1
-        fi
-        service="systemd-timesyncd.service"
-    else
-        log "Detected NTP service: ${service%.service}"
-    fi
-
-    if service_unit_active "$service"; then
-        TIME_SYNC_SERVICE_NAME="${service%.service}"
-        return 0
-    fi
-
-    if service_unit_enable_now "$service" || service_unit_start "$service"; then
-        log "NTP service started: ${service%.service}"
-        TIME_SYNC_SERVICE_NAME="${service%.service}"
-        return 0
-    fi
-
-    warn "Failed to enable or start NTP service: ${service%.service}"
-    return 1
-}
-
-enable_ntp_sync() {
-    local service
-
-    if ! timedatectl_available; then
-        info "timedatectl is unavailable. Install and start chrony, ntpsec, or systemd-timesyncd manually if time sync is required."
-        return 1
-    fi
-
-    if ! systemd_system_available; then
-        info "systemd is unavailable. Install and start an NTP daemon manually before enabling time synchronization."
-        return 1
-    fi
-
-    TIME_SYNC_SERVICE_NAME="Not configured"
-    ensure_time_sync_service || return 1
-    service="${TIME_SYNC_SERVICE_NAME}.service"
-
-    if timedatectl set-ntp true 2>/dev/null; then
-        log "NTP synchronization enabled via $TIME_SYNC_SERVICE_NAME"
-        return 0
-    fi
-
-    if service_unit_active "$service"; then
-        if system_clock_synchronized; then
-            log "Time sync already operational via $TIME_SYNC_SERVICE_NAME"
-        else
-            info "Time-sync daemon $TIME_SYNC_SERVICE_NAME is active even though timedatectl could not control it directly"
-        fi
-        return 0
-    fi
-
-    warn "Could not enable NTP via timedatectl after preparing $TIME_SYNC_SERVICE_NAME"
-    return 1
 }
 
 resolve_intel_media_packages() {
@@ -1448,8 +1442,10 @@ if $UPDATE_SYSTEM; then
     section "${SYMBOL_PACKAGE} System Update"
     # Enrich sources for non-free drivers (needed for Intel GPU)
     log "Enabling contrib non-free non-free-firmware repositories..."
-    enrich_all_apt_sources
-    common_apt_sources_changed
+    if ! common_enrich_apt_sources; then
+        error "Failed while rewriting APT source files"
+        exit 1
+    fi
 
     common_apt_update "system update"
     common_apt_get upgrade -y
@@ -1553,13 +1549,12 @@ EOF
         fi
     fi
 
-    TIME_SYNC_SERVICE_NAME="Not configured"
-    enable_ntp_sync || true
+    common_enable_time_sync || true
 
     info "Localization configured:"
     info "  Locale: $DEFAULT_LOCALE"
     info "  Timezone: ${NEW_TIMEZONE:-unchanged}"
-    info "  Time sync: $TIME_SYNC_SERVICE_NAME"
+    info "  Time sync: ${COMMON_TIME_SYNC_SERVICE:-Not configured}"
 fi
 
 ################################################################################

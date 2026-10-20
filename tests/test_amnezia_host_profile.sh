@@ -475,7 +475,7 @@ test_fail2ban_jail_is_backed_up_before_overwrite() {
     run_case '
         FAIL2BAN_JAIL_FILE="$T/fail2ban/jail.local"
         mkdir -p "$T/fail2ban"
-        systemd_system_available() { return 1; }
+        common_systemd_running() { return 1; }
         # A distinct stamp per call keeps two backups made within one second apart.
         date() { local n; n=$(( $(cat "$T/clock" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$T/clock"; echo "TS$n"; }
         backups() { find "$T/fail2ban" -name "jail.local.backup.*" | wc -l; }
@@ -601,7 +601,7 @@ SSH_CASE_SETUP='
         fi
         [ ! -e "$T/sshd_test_fails" ]
     }
-    systemd_system_available() { [ ! -e "$T/no_systemd" ]; }
+    common_systemd_running() { [ ! -e "$T/no_systemd" ]; }
     systemctl() {
         event "systemctl $*"
         if [ -e "$T/units_fail_on_new_port" ] && grep -q "^Port 2222" "$SSH_HARDENING_DROPIN" 2>/dev/null; then
@@ -936,7 +936,7 @@ test_docker_repository_and_packages() {
         common_apt_sources_changed() { event "apt-sources-changed"; }
         common_apt_update() { event "apt-update $1"; }
         common_safe_install() { event "safe_install $*"; }
-        systemd_system_available() { return 1; }
+        common_systemd_running() { return 1; }
         groupadd() { event "groupadd $*"; }
         ensure_target_user_privileges() { event ensure_target_user_privileges; }
 

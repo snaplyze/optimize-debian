@@ -338,6 +338,98 @@ if ! declare -F common_apt_get >/dev/null; then
         common_safe_install -t "$release" "$@" && common_package_installed_from "$release" "$@"
     }
 fi
+
+if ! declare -F common_systemd_running >/dev/null; then
+    # systemd runs as the init system (not in WSL without systemd or in most containers).
+    common_systemd_running() {
+        command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+    }
+
+    # The kernel reports the clock as synchronized. timedatectl names this NTPSynchronized;
+    # it has no SystemClockSynchronized property (Debian 12 and 13).
+    common_system_clock_synchronized() {
+        [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ]
+    }
+
+    # common_ensure_time_sync_service: keeps the first installed time-sync service of chrony,
+    # ntpsec, ntp, openntpd and systemd-timesyncd, starting it when it is inactive, and installs
+    # systemd-timesyncd only when none is installed: in Debian these packages conflict, so
+    # installing another one would remove the operator's. Sets COMMON_TIME_SYNC_SERVICE to the
+    # running service without .service. Returns 1 without systemd or when no service runs.
+    common_ensure_time_sync_service() {
+        local unit service=""
+
+        COMMON_TIME_SYNC_SERVICE=""
+        common_systemd_running || return 1
+
+        for unit in chronyd.service chrony.service ntpsec.service ntp.service openntpd.service systemd-timesyncd.service; do
+            if systemctl list-unit-files "$unit" --no-legend >/dev/null 2>&1; then
+                service="$unit"
+                break
+            fi
+        done
+
+        if [ -z "$service" ]; then
+            # The index may not be refreshed yet in this run (an image with empty package lists).
+            common_apt_update "time sync service lookup" || true
+            if ! common_package_available systemd-timesyncd; then
+                warn "No supported NTP service detected and systemd-timesyncd is unavailable"
+                return 1
+            fi
+            log "No NTP service detected. Installing systemd-timesyncd..."
+            if ! common_safe_install systemd-timesyncd; then
+                warn "Failed to install systemd-timesyncd"
+                return 1
+            fi
+            service="systemd-timesyncd.service"
+        else
+            log "Detected NTP service: ${service%.service}"
+        fi
+
+        if ! systemctl is-active "$service" >/dev/null 2>&1; then
+            if ! systemctl enable --now "$service" >/dev/null 2>&1 && ! systemctl start "$service" >/dev/null 2>&1; then
+                warn "Failed to enable or start NTP service: ${service%.service}"
+                return 1
+            fi
+            log "NTP service started: ${service%.service}"
+        fi
+        COMMON_TIME_SYNC_SERVICE="${service%.service}"
+    }
+
+    # common_enable_time_sync: common_ensure_time_sync_service, then `timedatectl set-ntp true`.
+    # Returns 1 without timedatectl or systemd, or when time sync could not be enabled.
+    common_enable_time_sync() {
+        COMMON_TIME_SYNC_SERVICE=""
+        if ! command -v timedatectl >/dev/null 2>&1; then
+            info "timedatectl is unavailable. Install and start chrony, ntpsec, or systemd-timesyncd manually if time sync is required."
+            return 1
+        fi
+        if ! common_systemd_running; then
+            info "systemd is unavailable. Install and start an NTP daemon manually before enabling time synchronization."
+            return 1
+        fi
+
+        common_ensure_time_sync_service || return 1
+
+        if timedatectl set-ntp true 2>/dev/null; then
+            log "NTP synchronization enabled via $COMMON_TIME_SYNC_SERVICE"
+            return 0
+        fi
+
+        if systemctl is-active "$COMMON_TIME_SYNC_SERVICE.service" >/dev/null 2>&1; then
+            if common_system_clock_synchronized; then
+                log "Time sync already operational via $COMMON_TIME_SYNC_SERVICE"
+            else
+                info "Time-sync daemon $COMMON_TIME_SYNC_SERVICE is active even though timedatectl could not control it directly"
+            fi
+            return 0
+        fi
+
+        warn "Could not enable NTP via timedatectl after preparing $COMMON_TIME_SYNC_SERVICE"
+        return 1
+    }
+fi
+
 TARGET_USER=""
 ADDUSER_BIN="/usr/sbin/adduser"
 SSH_HARDENING_DROPIN="/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf"
@@ -517,74 +609,12 @@ require_supported_debian_release() {
     fi
 }
 
-systemd_system_available() {
-    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
-}
-
-timedatectl_available() {
-    command -v timedatectl >/dev/null 2>&1
-}
-
-system_clock_synchronized() {
-    timedatectl_available && timedatectl show -p NTPSynchronized --value 2>/dev/null | grep -qi '^yes$'
-}
-
-service_unit_exists() {
-    systemctl list-unit-files "$1" >/dev/null 2>&1
-}
-
-service_unit_active() {
-    systemctl is-active "$1" >/dev/null 2>&1
-}
-
 service_unit_enable_now() {
     systemctl enable --now "$1" >/dev/null 2>&1
 }
 
 service_unit_start() {
     systemctl start "$1" >/dev/null 2>&1
-}
-
-detect_time_sync_service() {
-    local unit
-
-    for unit in ntpsec.service ntp.service chrony.service chronyd.service systemd-timesyncd.service; do
-        if service_unit_exists "$unit" && service_unit_active "$unit"; then
-            printf '%s\n' "$unit"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-ensure_time_sync_service() {
-    local detected_service=""
-
-    if ! systemd_system_available; then
-        warn "systemd is not available; skipping time sync service checks"
-        return 0
-    fi
-
-    if detected_service=$(detect_time_sync_service); then
-        TIME_SYNC_SERVICE_NAME="$detected_service"
-        log "Keeping existing time sync service: ${TIME_SYNC_SERVICE_NAME}"
-        return 0
-    fi
-
-    warn "No active time sync service detected"
-
-    if common_package_available systemd-timesyncd; then
-        common_safe_install systemd-timesyncd || warn "Failed to install systemd-timesyncd"
-        if service_unit_enable_now systemd-timesyncd.service; then
-            TIME_SYNC_SERVICE_NAME="systemd-timesyncd.service"
-            log "Enabled fallback time sync service: ${TIME_SYNC_SERVICE_NAME}"
-            return 0
-        fi
-    fi
-
-    warn "Could not enable a fallback time sync service automatically"
-    return 1
 }
 
 validate_firewall_phase() {
@@ -1018,10 +1048,9 @@ configure_locales() {
 
 configure_time_sync() {
     section "Time synchronization"
-    TIME_SYNC_SERVICE_NAME="Not configured"
-    ensure_time_sync_service || true
+    common_enable_time_sync || true
 
-    if system_clock_synchronized; then
+    if common_system_clock_synchronized; then
         log "System clock is synchronized"
     else
         warn "System clock is not yet reported as synchronized"
@@ -1085,7 +1114,7 @@ install_docker_ce() {
     common_apt_update "Docker repository refresh"
     common_safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-    if systemd_system_available; then
+    if common_systemd_running; then
         service_unit_enable_now docker.service || service_unit_start docker.service || true
         service_unit_enable_now docker.socket || service_unit_start docker.socket || true
     fi
@@ -1400,7 +1429,7 @@ configure_fail2ban() {
         render_fail2ban_jail > "$FAIL2BAN_JAIL_FILE"
     fi
 
-    if systemd_system_available; then
+    if common_systemd_running; then
         service_unit_enable_now fail2ban.service || service_unit_start fail2ban.service || true
         systemctl restart fail2ban.service >/dev/null 2>&1 || true
     fi
@@ -1508,7 +1537,7 @@ configure_ssh_hardening() {
 
     # Without systemd sshd is not restarted, so it keeps its old port while
     # configure_firewall opens only the new one.
-    if ! systemd_system_available && [ "$SSH_PORT" != "$(current_ssh_port)" ]; then
+    if ! common_systemd_running && [ "$SSH_PORT" != "$(current_ssh_port)" ]; then
         error "systemd is not available, so the SSH service cannot be restarted to move it to port ${SSH_PORT}"
         error "Keep the current SSH port, or restart the SSH service yourself and re-run the script"
         exit 1
@@ -1536,7 +1565,7 @@ configure_ssh_hardening() {
         exit 1
     fi
 
-    if ! systemd_system_available; then
+    if ! common_systemd_running; then
         rm -f "$backup"
         warn "systemd is not available; restart the SSH service manually to apply the drop-in"
         log "SSH hardening drop-in written (port ${SSH_PORT})"

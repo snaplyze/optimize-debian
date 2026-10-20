@@ -400,6 +400,84 @@ if ! declare -F common_apt_get >/dev/null; then
     }
 fi
 
+if ! declare -F common_enrich_apt_components >/dev/null; then
+    # common_enrich_apt_components <file>: adds contrib, non-free and non-free-firmware to every
+    # source in <file> that has the main component: the deb and deb-src lines of a one-line file,
+    # the Components fields of a deb822 .sources file. The file is rewritten only when a component
+    # is added: through a temporary file in its directory that gets its mode and owner and then
+    # replaces it, so a failed write leaves the source as it was; the next common_apt_update
+    # refreshes the index. Returns 1 when the file cannot be read or rewritten.
+    common_enrich_apt_components() {
+        local f="${1:-}"
+        local format=list
+        local tmp_file line body comment words added changed=0 read_status=0
+
+        [ -f "$f" ] || return 0
+        [[ "$f" == *.sources ]] && format=deb822
+
+        if ! tmp_file="$(mktemp "$(dirname "$f")/.$(basename "$f").XXXXXX")"; then
+            error "Failed to allocate temporary file while updating $f"
+            return 1
+        fi
+
+        while IFS= read -r line || [ -n "$line" ]; do
+            body="$line"
+            comment=""
+            if [ "$format" = list ] && [[ "$line" == *"#"* ]]; then
+                body="${line%%#*}"
+                comment="#${line#*#}"
+            fi
+            if { [ "$format" = list ] && [[ "$body" =~ ^[[:space:]]*deb(-src)?[[:space:]] ]]; } ||
+                { [ "$format" = deb822 ] && [[ "$body" =~ ^[[:space:]]*[Cc]omponents: ]]; }; then
+                words=" ${body//[[:space:]:]/ } "
+                added=""
+                if [[ "$words" == *" main "* ]]; then
+                    [[ "$words" == *" contrib "* ]] || added+=" contrib"
+                    [[ "$words" == *" non-free "* ]] || added+=" non-free"
+                    [[ "$words" == *" non-free-firmware "* ]] || added+=" non-free-firmware"
+                fi
+                if [ -n "$added" ]; then
+                    body="${body%"${body##*[![:space:]]}"}"
+                    line="${body}${added}${comment:+ $comment}"
+                    changed=1
+                fi
+            fi
+            printf '%s\n' "$line"
+        done < "$f" > "$tmp_file" || read_status=1
+        if [ "$read_status" -ne 0 ]; then
+            rm -f "$tmp_file"
+            error "Failed to read APT source file: $f"
+            return 1
+        fi
+
+        if [ "$changed" -eq 0 ]; then
+            rm -f "$tmp_file"
+            return 0
+        fi
+
+        progress "Updating APT source file: $f"
+        if ! chmod --reference="$f" "$tmp_file" || ! chown --reference="$f" "$tmp_file" || ! mv -f "$tmp_file" "$f"; then
+            rm -f "$tmp_file"
+            error "Failed to write updated APT source file: $f"
+            return 1
+        fi
+        common_apt_sources_changed
+    }
+
+    # common_enrich_apt_sources [apt_dir]: common_enrich_apt_components for sources.list and every
+    # .list and .sources file in sources.list.d of <apt_dir> (/etc/apt). Returns 1 when a file could
+    # not be rewritten; the other files are still processed.
+    common_enrich_apt_sources() {
+        local apt_dir="${1:-/etc/apt}"
+        local f status=0
+
+        for f in "$apt_dir/sources.list" "$apt_dir"/sources.list.d/*.list "$apt_dir"/sources.list.d/*.sources; do
+            common_enrich_apt_components "$f" || status=1
+        done
+        return "$status"
+    }
+fi
+
 if ! declare -F tui_detect_backend >/dev/null; then
     : "${GUM:=/usr/local/bin/gum}"
     : "${TUI_GUM_VERSION:=0.17.0}"
@@ -1167,28 +1245,10 @@ if $UPDATE_SYSTEM; then
     progress "Updating system packages..."
     
     # Enrich APT components
-    enrich_apt_components() {
-        local f="$1"; [ -f "$f" ] || return 0
-        sed -i -E '/^\s*deb\s/ { /non-free-firmware/! s/(^deb\s+[^#]*\bmain)(\s|$)/\1 contrib non-free non-free-firmware\2/ }' "$f"
-    }
-
-    enrich_deb822_components() {
-        local f="$1"; [ -f "$f" ] || return 0
-        sed -i -E '/^\s*Components:\s*/ {
-            /contrib/! s/$/ contrib/
-            /non-free([[:space:]]|$)/! s/$/ non-free/
-            /non-free-firmware/! s/$/ non-free-firmware/
-        }' "$f"
-    }
-    
-    enrich_apt_components "/etc/apt/sources.list"
-    for f in /etc/apt/sources.list.d/*.list; do 
-        [ -e "$f" ] && enrich_apt_components "$f"
-    done
-    for f in /etc/apt/sources.list.d/*.sources; do
-        [ -e "$f" ] && enrich_deb822_components "$f"
-    done
-    common_apt_sources_changed
+    if ! common_enrich_apt_sources; then
+        error "Failed while rewriting APT source files"
+        exit 1
+    fi
 
     # Update package lists once, then upgrade
     common_apt_update "system update"

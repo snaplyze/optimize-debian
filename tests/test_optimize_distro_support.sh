@@ -193,8 +193,6 @@ test_flat_step_regression_contracts() {
         'optimize_mini_pc.sh|install_fnm_for_user root || warn'
         'optimize_wsl2.sh|gpu_status_wsl || true'
         'optimize_vps.sh|MAX_BUFFER=67108864'
-        'optimize_vps.sh|if [ -e "$f" ]; then'
-        'optimize_mini_pc.sh|if [ -e "$f" ]; then'
         'optimize_vps.sh|common_safe_install linux-cpupower'
         'optimize_mini_pc.sh|common_safe_install linux-cpupower'
         'optimize_mini_pc.sh|if $INSTALL_GO; then'
@@ -321,11 +319,15 @@ test_apt_settings_ignore_environment() {
 # Text check (hygiene): the removed APT helper names must not come back.
 test_apt_helpers_replace_old_implementations() {
     local script
-    # The APT helpers live in lib/common.sh (tests/test_apt_helpers.sh) and are embedded in
-    # every script (tests/test_embedded_copies.sh); no script keeps its own variant.
+    # The APT, APT sources and time-sync helpers live in lib/common.sh (tests/test_apt_helpers.sh,
+    # tests/test_time_sync.sh) and are embedded in the scripts (tests/test_embedded_copies.sh);
+    # no script keeps its own variant.
     for script in optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh optimize_amnezia_host.sh; do
         if grep -nE 'fuser|wait_for_dpkg_lock|run_apt_update_with_diagnostics|apt_update_once|(^|[^_a-z])(safe_install|package_available)\b' "$ROOT_DIR/$script"; then
             fail "$script must use the common_apt_* / common_safe_install helpers only"
+        fi
+        if grep -nE '(^|[^_a-z])(enrich_all_apt_sources|enrich_apt_components|enrich_deb822_components|enable_ntp_sync|ensure_time_sync_service|detect_time_sync_service|time_sync_candidate_units|timedatectl_available|system_clock_synchronized|systemd_system_available)\b' "$ROOT_DIR/$script"; then
+            fail "$script must use common_enrich_apt_sources and the common time-sync helpers only"
         fi
     done
 }
@@ -338,14 +340,9 @@ test_apt_source_changes_reset_the_index_mark() {
     # refresh or installation, or the new repository stays invisible.
     for script in optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh optimize_amnezia_host.sh; do
         bad="$(awk '
-            # Bodies of the enrich_* helpers are the changes themselves; their callers are checked.
-            /^[[:space:]]*enrich_[a-z0-9_]*\(\) \{/ { skip = 1; next }
-            skip && /^[[:space:]]*\}$/ { skip = 0; next }
-            skip || /^[[:space:]]*#/ { next }
+            /^[[:space:]]*#/ { next }
             /common_apt_sources_changed/ { pending = 0; next }
             /(>|tee) .*(docker\.sources|debian-backports\.sources|nvidia-container-toolkit\.list|\$DOCKER_SOURCES_FILE|\$BACKPORTS_SOURCES_FILE)/ ||
-            /^[[:space:]]*enrich_all_apt_sources[^(]*$/ ||
-            /^[[:space:]]*(enrich_apt_components|enrich_deb822_components) / ||
             /sed -i.*(sources\.list|Components:)/ ||
             /add-apt-repository / ||
             tolower($0) ~ /dpkg -i .*keyring/ ||
@@ -391,104 +388,6 @@ test_wsl_apt_update_check() {
     '
 }
 
-test_vps_ntp_and_apt_helpers() {
-    SCRIPT_ROOT="$ROOT_DIR" bash -c '
-        set -euo pipefail
-        OPTIMIZE_SOURCE_ONLY=1
-        source "$SCRIPT_ROOT/optimize_vps.sh"
-        test_tmp="$(mktemp -d)"
-        trap "rm -rf \"$test_tmp\"" EXIT
-        log() { :; }
-        warn() { :; }
-        info() { :; }
-        log_silent() { :; }
-
-        service_unit_exists() { [ "$1" = "chronyd.service" ]; }
-        [[ "$(detect_time_sync_service)" == "chronyd.service" ]]
-
-        systemd_system_available() { return 0; }
-        service_unit_exists() { return 1; }
-        common_package_available() { [ "$1" = "systemd-timesyncd" ]; }
-        common_safe_install() { printf "%s\n" "$*" > "$test_tmp/ntp-install.txt"; }
-        service_unit_active() { return 1; }
-        service_unit_enable_now() { return 0; }
-        service_unit_start() { return 0; }
-        TIME_SYNC_SERVICE_NAME="Not configured"
-        ensure_time_sync_service
-        [[ "$TIME_SYNC_SERVICE_NAME" == "systemd-timesyncd" ]]
-        [[ "$(cat "$test_tmp/ntp-install.txt")" == "systemd-timesyncd" ]]
-
-        timedatectl_available() { return 0; }
-        ensure_time_sync_service() { TIME_SYNC_SERVICE_NAME="chronyd"; return 0; }
-        detect_time_sync_service() { printf "%s\n" "chronyd.service"; }
-        timedatectl() { return 0; }
-        TIME_SYNC_SERVICE_NAME="Not configured"
-        enable_ntp_sync
-        [[ "$TIME_SYNC_SERVICE_NAME" == "chronyd" ]]
-
-        ensure_time_sync_service() { TIME_SYNC_SERVICE_NAME="ntpsec"; return 0; }
-        service_unit_active() { [ "$1" = "ntpsec.service" ]; }
-        system_clock_synchronized() { return 0; }
-        info() { :; }
-        timedatectl() { return 1; }
-        TIME_SYNC_SERVICE_NAME="Not configured"
-        enable_ntp_sync
-        [[ "$TIME_SYNC_SERVICE_NAME" == "ntpsec" ]]
-
-        tmp_file=$(mktemp)
-        printf "%s\n" "deb http://mirror.example/debian bookworm main non-free-firmware" > "$tmp_file"
-        enrich_apt_components "$tmp_file"
-        grep -q "main non-free-firmware contrib non-free" "$tmp_file"
-        rm -f "$tmp_file"
-    '
-}
-
-test_vps_enrichment_rewrite_failure_is_diagnostic() {
-    SCRIPT_ROOT="$ROOT_DIR" bash -c '
-        set -euo pipefail
-        OPTIMIZE_SOURCE_ONLY=1
-        source "$SCRIPT_ROOT/optimize_vps.sh"
-        test_tmp="$(mktemp -d)"
-        trap "rm -rf \"$test_tmp\"" EXIT
-        progress() { :; }
-        error() { printf "ERROR: %s\n" "$1"; }
-        mktemp() { return 1; }
-
-        tmp_file="$test_tmp/vps-source-test"
-        printf "%s\n" "deb http://mirror.example/debian bookworm main" > "$tmp_file"
-
-        if enrich_apt_components "$tmp_file" > "$test_tmp/enrich-diag.txt" 2>&1; then
-            printf "FAIL: expected enrich_apt_components to fail when mktemp fails\n" >&2
-            exit 1
-        fi
-
-        grep -q "Failed to allocate temporary file while updating" "$test_tmp/enrich-diag.txt"
-    '
-}
-
-test_mini_ntp_helper() {
-    SCRIPT_ROOT="$ROOT_DIR" bash -c '
-        set -euo pipefail
-        OPTIMIZE_SOURCE_ONLY=1
-        source "$SCRIPT_ROOT/optimize_mini_pc.sh"
-        log() { :; }
-        warn() { :; }
-        info() { :; }
-        log_silent() { :; }
-
-        systemd_system_available() { return 0; }
-        common_package_available() { [ "$1" = "systemd-timesyncd" ]; }
-        service_unit_exists() { return 1; }
-        service_unit_active() { return 1; }
-        service_unit_enable_now() { return 0; }
-        service_unit_start() { return 0; }
-        common_safe_install() { :; }
-        TIME_SYNC_SERVICE_NAME="Not configured"
-        ensure_time_sync_service
-        [[ "$TIME_SYNC_SERVICE_NAME" == "systemd-timesyncd" ]]
-    '
-}
-
 main() {
     test_supported_debian_versions
     test_wsl_release_helpers
@@ -503,9 +402,6 @@ main() {
     test_apt_helpers_replace_old_implementations
     test_apt_source_changes_reset_the_index_mark
     test_wsl_apt_update_check
-    test_vps_ntp_and_apt_helpers
-    test_vps_enrichment_rewrite_failure_is_diagnostic
-    test_mini_ntp_helper
     printf 'tests/test_optimize_distro_support.sh: OK\n'
 }
 
