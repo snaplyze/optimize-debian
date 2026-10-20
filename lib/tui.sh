@@ -159,10 +159,7 @@ tui_gum() {
 tui_prompt_yn() {
     local prompt="$1"
     local default_yes="$2"
-    local backend
-    local answer
-    local prompt_suffix
-
+    local backend answer prompt_suffix
     backend="$(tui_detect_backend)" || backend="plain"
     if [ "$backend" = "gum" ] && tui_gum_path >/dev/null 2>&1; then
         if $default_yes; then
@@ -172,7 +169,6 @@ tui_prompt_yn() {
         fi
         return $?
     fi
-
     if { [ "$backend" = "dialog" ] || [ "$backend" = "whiptail" ]; } && command -v "$backend" >/dev/null 2>&1; then
         if $default_yes; then
             "$backend" --yesno "$prompt" 8 70 3>&1 1>&2 2>&3
@@ -181,43 +177,21 @@ tui_prompt_yn() {
         fi
         return $?
     fi
-
-    if $default_yes; then
-        prompt_suffix="[Y/n]"
-    else
-        prompt_suffix="[y/N]"
-    fi
-
+    if $default_yes; then prompt_suffix="[Y/n]"; else prompt_suffix="[y/N]"; fi
     read -r -p "${TUI_PROMPT_PREFIX:-}${prompt} ${prompt_suffix}: " answer || answer=""
     case "$answer" in
-        [yY]|[yY][eE][sS])
-            return 0
-            ;;
-        [nN]|[nN][oO])
-            return 1
-            ;;
-        "")
-            $default_yes
-            return $?
-            ;;
-        *)
-            printf 'Invalid response. Please answer yes or no.\n' >&2
-            tui_prompt_yn "$prompt" "$default_yes"
-            ;;
+        [yY]|[yY][eE][sS]) return 0 ;;
+        [nN]|[nN][oO]) return 1 ;;
+        "") $default_yes; return $? ;;
+        *) printf 'Invalid response. Please answer yes or no.\n' >&2; tui_prompt_yn "$prompt" "$default_yes" ;;
     esac
 }
 
 tui_radiolist() {
-    local title="$1"
-    local prompt="$2"
-    local height="$3"
-    local width="$4"
-    local list_height="$5"
-    local backend
+    local title="$1" prompt="$2" height="$3" width="$4" list_height="$5" backend
     local tag label status choice
     local options=()
     shift 5
-
     backend="$(tui_detect_backend)" || return 1
     case "$backend" in
         gum)
@@ -240,8 +214,6 @@ tui_radiolist() {
             command -v "$backend" >/dev/null 2>&1 || return 1
             "$backend" --title "$title" --radiolist "$prompt" "$height" "$width" "$list_height" "$@" 3>&1 1>&2 2>&3
             ;;
-        plain)
-            return 1
-            ;;
+        plain) return 1 ;;
     esac
 }

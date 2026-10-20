@@ -109,6 +109,8 @@ test_safe_write_sudoers() {
         assert_status 2 common_safe_write_sudoers "$temp_file" "invalid sudoers syntax ??? !!!"
         [ ! -f "$temp_file" ] || fail "invalid sudoers file should not exist after failure"
         rm -f "$temp_file"
+    else
+        printf 'SKIP: invalid sudoers syntax case of common_safe_write_sudoers: visudo is not installed\n'
     fi
 }
 

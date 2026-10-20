@@ -199,7 +199,10 @@ test_script_text_contracts() {
 }
 
 test_generated_fish_config_templates_parse() {
-    command -v fish >/dev/null 2>&1 || return 0
+    if ! command -v fish >/dev/null 2>&1; then
+        printf 'SKIP: generated config.fish templates are not parsed: fish is not installed\n'
+        return 0
+    fi
 
     local tmp_dir
     tmp_dir=$(mktemp -d)

@@ -88,11 +88,7 @@ common_render_docker_debian_source() {
     local suite="${2:-}"
     local architecture="${3:-}"
     local signed_by="${4:-}"
-
-    if [ -z "$os_id" ] || [ -z "$suite" ] || [ -z "$architecture" ] || [ -z "$signed_by" ]; then
-        return 1
-    fi
-
+    [ -n "$os_id" ] && [ -n "$suite" ] && [ -n "$architecture" ] && [ -n "$signed_by" ] || return 1
     cat <<EOF
 Types: deb
 URIs: https://download.docker.com/linux/${os_id}
@@ -128,11 +124,7 @@ EOF
 common_render_debian_backports_source() {
     local suite="${1:-}"
     local signed_by="${2:-/usr/share/keyrings/debian-archive-keyring.gpg}"
-
-    if [ -z "$suite" ]; then
-        return 1
-    fi
-
+    [ -n "$suite" ] || return 1
     cat <<EOF
 Types: deb
 URIs: http://deb.debian.org/debian
