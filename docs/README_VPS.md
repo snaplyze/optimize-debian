@@ -82,7 +82,7 @@ lsb_release -a
 - ✅ Обновление системы до последней версии
 - ✅ Удаление ненужных пакетов
 - ✅ Настройка репозиториев
-- ✅ Создание пользователя с sudo
+- ✅ Создание пользователя с sudo без пароля: `NOPASSWD:ALL` в `/etc/sudoers.d/<user>`, для `root` — в `/etc/sudoers.d/root`
 - ✅ Генерация обеих локалей `ru_RU.UTF-8` и `en_US.UTF-8` для SSH; меню выбирает язык по умолчанию. `update-locale` использует штатный файл Debian 12/13, постоянный `LC_ALL` не задаётся. [Исправление на уже настроенном сервере](README_AMNEZIA_HOST.md#ошибка-setlocale-при-входе-по-ssh).
 - ✅ Настройка часового пояса
 - ✅ Проверка существующего NTP daemon и fallback на `systemd-timesyncd`
@@ -317,15 +317,15 @@ net.ipv4.conf.default.rp_filter = 2
 net.ipv4.tcp_fastopen = 3
 
 # UDP Buffer Sizes (critical for VPN protocols like WireGuard, OpenVPN)
-net.ipv4.udp_rmem_min = 8192
-net.ipv4.udp_wmem_min = 8192
+net.ipv4.udp_rmem_min = 16384
+net.ipv4.udp_wmem_min = 16384
 
 # IP Forwarding (required for VPN)
 net.ipv4.ip_forward = 1
 net.ipv6.conf.all.forwarding = 1
 
 # Connection Tracking (for multiple simultaneous VPN connections)
-net.netfilter.nf_conntrack_max = 524288
+net.netfilter.nf_conntrack_max = 262144
 net.netfilter.nf_conntrack_tcp_timeout_established = 1800
 
 # NAT Performance
