@@ -1,0 +1,72 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  # A newer push cancels an older run of the same PR; every main commit keeps its own run.
+  group: checks-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    # The runner is self-hosted and the repository is public: only the owner's pushes and the
+    # owner's pull requests from this repository reach it, never code from a fork.
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'push' ||
+       (github.event.pull_request.user.login == github.repository_owner &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: [self-hosted, Linux, X64, fedora, project-optimize-debian]
+    # Every check takes about 10 seconds locally; the limit only stops a hang.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, resolved 2026-10-20
+        with:
+          persist-credentials: false
+          # A pull request checks out its merge commit; its first parent is the base for the
+          # whitespace check.
+          fetch-depth: 2
+      - name: ShellCheck
+        # ShellCheck is the release pinned in .github/shellcheck.txt, from its GitHub release and
+        # checked by the SHA-256 written there. Only the archive stays in the user's cache, outside
+        # the workspace: every run checks a copy of it and unpacks that afresh into this job's temp
+        # directory, so nothing unpacked by an earlier run is ever executed.
+        run: |
+          set -euo pipefail
+          read -r version expected < <(grep -E '^v[0-9]' .github/shellcheck.txt)
+          archive="shellcheck-$version.linux.x86_64.tar.xz"
+          cache="${XDG_CACHE_HOME:-$HOME/.cache}/optimize-debian-shellcheck"
+          mkdir -p "$cache"
+          if [ ! -f "$cache/$archive" ] \
+            || [ "$(sha256sum "$cache/$archive" | cut -d' ' -f1)" != "$expected" ]; then
+            fresh="$(mktemp "$cache/$archive.XXXXXX")"
+            curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+              --output "$fresh" \
+              "https://github.com/koalaman/shellcheck/releases/download/$version/$archive"
+            mv "$fresh" "$cache/$archive"
+          fi
+          work="$(mktemp -d "$RUNNER_TEMP/shellcheck.XXXXXX")"
+          cp "$cache/$archive" "$work/$archive"
+          # The copy is what is checked and unpacked: a change to the cache after the check
+          # does not reach this job.
+          if [ "$(sha256sum "$work/$archive" | cut -d' ' -f1)" != "$expected" ]; then
+            echo "$archive does not match the SHA-256 in .github/shellcheck.txt" >&2
+            exit 1
+          fi
+          tar -xJf "$work/$archive" -C "$work"
+          echo "$work/shellcheck-$version" >> "$GITHUB_PATH"
+          "$work/shellcheck-$version/shellcheck" --version
+      - name: Syntax
+        # bash -n reads only its first file and passes the rest to it as arguments.
+        run: for f in *.sh lib/*.sh tests/*.sh; do bash -n "$f" || exit 1; done
+      - name: Lint
+        run: shellcheck -- *.sh lib/*.sh tests/*.sh
+      - name: Tests
+        # The runner's user must not be root: tests/test_root_privileges_check.sh skips under root.
+        run: for t in tests/*.sh; do bash "$t" || exit 1; done
+      - name: Whitespace
+        # Only what the pull request adds: older files still carry trailing whitespace.
+        if: github.event_name == 'pull_request'
+        run: git diff --check HEAD^1 HEAD
