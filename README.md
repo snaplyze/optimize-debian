@@ -397,12 +397,12 @@ sudo chown -R $(whoami):$(whoami) ~/.config
 
 ### Разработка и проверка:
 ```bash
-for f in *.sh lib/*.sh tests/*.sh; do bash -n "$f"; done
-shellcheck optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh optimize_amnezia_host.sh upgrade-to-debian13.sh lib/*.sh tests/*.sh
-for test in tests/test_*.sh; do bash "$test"; done
+for f in *.sh lib/*.sh tests/*.sh; do bash -n "$f" || echo "FAIL: $f"; done
+shellcheck -- *.sh lib/*.sh tests/*.sh
+for test in tests/*.sh; do bash "$test" || echo "FAIL: $test"; done
 ```
 
-`bash -n` проверяет только первый переданный файл, поэтому синтаксис проверяется по одному файлу. Те же проверки выполняет CI (`.github/workflows/ci.yml`) на self-hosted раннере для push в `main` и PR владельца.
+`bash -n` проверяет только первый переданный файл, поэтому синтаксис проверяется по одному файлу. Те же проверки выполняет CI (`.github/workflows/ci.yml`) на self-hosted раннере для push в `main` и PR владельца из этого же репозитория. Запуски из форков требуют одобрения владельца — не одобряйте их: PR из форка исполняет на раннере свой вариант workflow.
 
 Внутренние helper'ы лежат в `lib/common.sh` и `lib/tui.sh`. TUI сделан в стиле `arch-linux-installer.sh`: основной backend — Charmbracelet `gum`, при необходимости он подтягивается автоматически с проверкой checksum; если `gum` недоступен, используется plain Bash prompt. `dialog`/`whiptail` не выбираются автоматически и доступны только через явный `TUI_BACKEND=dialog|whiptail`. Docker deb822 sources рендерятся через общий helper с `Architectures: $(dpkg --print-architecture)`.
 

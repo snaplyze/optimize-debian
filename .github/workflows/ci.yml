@@ -11,8 +11,11 @@ concurrency:
   cancel-in-progress: true
 jobs:
   checks:
-    # The runner is self-hosted and the repository is public: only the owner's pushes and the
-    # owner's pull requests from this repository reach it, never code from a fork.
+    # The runner is self-hosted and the repository is public. This condition keeps an unchanged
+    # workflow to the owner's pushes and the owner's pull requests from this repository, but a
+    # pull request runs the workflow of its own merge commit, so a fork can drop it: the boundary
+    # for forks is the repository's approval of fork pull request workflows ("all external
+    # contributors"). Never approve a fork's run: approving runs that fork's workflow here.
     if: >-
       github.actor == github.repository_owner &&
       (github.event_name == 'push' ||
@@ -42,6 +45,7 @@ jobs:
           if [ ! -f "$cache/$archive" ] \
             || [ "$(sha256sum "$cache/$archive" | cut -d' ' -f1)" != "$expected" ]; then
             fresh="$(mktemp "$cache/$archive.XXXXXX")"
+            trap 'rm -f "$fresh"' EXIT
             curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
               --output "$fresh" \
               "https://github.com/koalaman/shellcheck/releases/download/$version/$archive"
