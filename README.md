@@ -30,7 +30,7 @@
 **Назначение:** Подготовка Debian 12/13 хоста под AmneziaVPN self-hosted (с тюнингом под каналы до 10 Гбит/с)
 - **Поддерживаемые ОС:** **Debian 12 (Bookworm)** и **Debian 13 (Trixie)**
 - **Особенности:** 10G sysctl (BBR, fq, 64MB буферы), Fish shell + Starship (Nerd Font preset), Debian Backports kernel (`--kernel-backports`), SSH hardening, swap 2GB, Fail2Ban (с python3-systemd), UFW (с forward ACCEPT), Docker CE (vanilla)
-- **Использование:** `sudo ./optimize_amnezia_host.sh --user snaplyze`
+- **Использование:** `sudo ./optimize_amnezia_host.sh --yes` (целевой пользователь — вызвавший `sudo`; от root без `sudo` укажи `--user "$OPERATOR"`)
 
 **Ключевые возможности:**
 - ⚡ **10 Gbps Networking** - BBR, fq pacing, адаптивные BDP буферы (32–64MB), очереди 32k, conntrack 262k
@@ -152,28 +152,33 @@ sudo ./optimize_vps.sh
 
 ### Для AmneziaVPN host baseline:
 ```bash
-# Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user snaplyze --yes
+# Целевой пользователь: без --user это пользователь, запустивший sudo (SUDO_USER);
+# от root без sudo --user обязателен (root как целевой пользователь не допускается).
+# Задай имя оператора один раз (замени ops на своё):
+OPERATOR=ops
+
+# Быстрый запуск (bash + curl, под root)
+bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user "$OPERATOR" --yes
 
 # Или скачайте и запустите минимальный host baseline
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh
 chmod +x optimize_amnezia_host.sh
 
 # Рекомендуемый путь: подготовить host и сразу поставить vanilla Docker CE
-sudo ./optimize_amnezia_host.sh --user snaplyze --yes
+sudo ./optimize_amnezia_host.sh --yes
 
 # Если пользователя ещё нет, можно создать его сразу
-sudo ./optimize_amnezia_host.sh --user snaplyze --create-user \
+sudo ./optimize_amnezia_host.sh --user "$OPERATOR" --create-user \
   --ssh-public-key 'ssh-ed25519 AAAA... your-key' --yes
 
 # Если swap уже настроен отдельно, можно пропустить его создание
-sudo ./optimize_amnezia_host.sh --user snaplyze --skip-swap --yes
+sudo ./optimize_amnezia_host.sh --skip-swap --yes
 
 # Альтернатива: оставить установку Docker самому приложению Amnezia
-sudo ./optimize_amnezia_host.sh --user snaplyze --skip-docker --yes
+sudo ./optimize_amnezia_host.sh --skip-docker --yes
 
 # После того как AmneziaWG закреплён на 8443/udp, можно ужесточить firewall
-sudo ./optimize_amnezia_host.sh --user snaplyze --firewall-phase locked --yes
+sudo ./optimize_amnezia_host.sh --firewall-phase locked --yes
 ```
 
 ### Для Mini PC:
