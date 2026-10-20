@@ -388,6 +388,16 @@ if ! declare -F common_apt_get >/dev/null; then
             log "Packages installed successfully${release:+ from $release}"
         fi
     }
+
+    # common_install_from_release <release> <package>...: installs the packages from the release and
+    # succeeds only when every one of them is installed in a version that release provides.
+    common_install_from_release() {
+        local release="${1:-}"
+        shift || true
+
+        [ -n "$release" ] && [ $# -gt 0 ] || return 1
+        common_safe_install -t "$release" "$@" && common_package_installed_from "$release" "$@"
+    }
 fi
 
 if ! declare -F tui_detect_backend >/dev/null; then

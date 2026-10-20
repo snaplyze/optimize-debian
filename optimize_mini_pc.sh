@@ -358,6 +358,16 @@ if ! declare -F common_apt_get >/dev/null; then
             log "Packages installed successfully${release:+ from $release}"
         fi
     }
+
+    # common_install_from_release <release> <package>...: installs the packages from the release and
+    # succeeds only when every one of them is installed in a version that release provides.
+    common_install_from_release() {
+        local release="${1:-}"
+        shift || true
+
+        [ -n "$release" ] && [ $# -gt 0 ] || return 1
+        common_safe_install -t "$release" "$@" && common_package_installed_from "$release" "$@"
+    }
 fi
 
 if ! declare -F tui_detect_backend >/dev/null; then
@@ -1408,8 +1418,7 @@ if $INSTALL_KERNEL; then
 
         log "Installing official Debian Backports kernel ($KERNEL_PKG, $HEADERS_PKG)..."
         if common_apt_update "Backports repository refresh" \
-            && common_safe_install -t bookworm-backports "$KERNEL_PKG" "$HEADERS_PKG" \
-            && common_package_installed_from bookworm-backports "$KERNEL_PKG" "$HEADERS_PKG"; then
+            && common_install_from_release bookworm-backports "$KERNEL_PKG" "$HEADERS_PKG"; then
             log "Official Debian Backports kernel ($KERNEL_PKG, $HEADERS_PKG) installed successfully"
             BACKPORTS_KERNEL_INSTALLED=true
         else

@@ -327,6 +327,16 @@ if ! declare -F common_apt_get >/dev/null; then
             log "Packages installed successfully${release:+ from $release}"
         fi
     }
+
+    # common_install_from_release <release> <package>...: installs the packages from the release and
+    # succeeds only when every one of them is installed in a version that release provides.
+    common_install_from_release() {
+        local release="${1:-}"
+        shift || true
+
+        [ -n "$release" ] && [ $# -gt 0 ] || return 1
+        common_safe_install -t "$release" "$@" && common_package_installed_from "$release" "$@"
+    }
 fi
 TARGET_USER=""
 ADDUSER_BIN="/usr/sbin/adduser"
@@ -1106,8 +1116,7 @@ install_backports_kernel() {
     arch="$(dpkg --print-architecture)"
     progress "Installing latest kernel from backports (linux-image-$arch, linux-headers-$arch)"
     if common_apt_update "Backports repository refresh" \
-        && common_safe_install -t bookworm-backports "linux-image-$arch" "linux-headers-$arch" \
-        && common_package_installed_from bookworm-backports "linux-image-$arch" "linux-headers-$arch"; then
+        && common_install_from_release bookworm-backports "linux-image-$arch" "linux-headers-$arch"; then
         log "Debian Backports kernel and headers installed successfully"
     else
         error "Debian Backports kernel (linux-image-$arch, linux-headers-$arch) was not installed"

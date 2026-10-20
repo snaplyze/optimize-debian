@@ -344,7 +344,7 @@ test_apt_source_changes_reset_the_index_mark() {
             /^[[:space:]]*(enrich_apt_components|enrich_deb822_components) / ||
             /sed -i.*(sources\.list|Components:)/ ||
             /add-apt-repository / ||
-            /dpkg -i .*keyring/ ||
+            tolower($0) ~ /dpkg -i .*keyring/ ||
             /rm -f[^#]*\/etc\/apt\/sources\.list\.d\// { if (!pending) pending = NR; next }
             pending && /(common_safe_install|common_apt_update|common_apt_get (install|upgrade|dist-upgrade|full-upgrade))[[:space:]]/ {
                 print pending; pending = 0

@@ -47,6 +47,7 @@ make_mocks() {
     #   update_fail       apt-get update fails with a repository error
     #   install_lock_busy apt-get install fails on the dpkg lock unless DPkg::Lock::Timeout is passed
     #   install_lock_stuck apt-get install fails on the dpkg lock even with DPkg::Lock::Timeout
+    #   install_lock_after number of installations with packages before the dpkg lock gets stuck
     #   install_fail      packages (one per line) whose installation fails
     cat > "$MOCK_BIN/apt-get" <<'EOF'
 #!/usr/bin/env bash
@@ -73,6 +74,11 @@ case "$args" in
         printf 'Hit:1 http://deb.debian.org/debian bookworm InRelease\n'
         ;;
     *" install "*)
+        if [ -s "$state/install_lock_after" ] && [[ "$args" != *" install -y " ]]; then
+            left="$(cat "$state/install_lock_after")"
+            printf '%s\n' $((left - 1)) > "$state/install_lock_after"
+            [ "$left" -le 0 ] && : > "$state/install_lock_stuck"
+        fi
         if [ -e "$state/install_lock_stuck" ] || { [ -e "$state/install_lock_busy" ] && [[ "$args" != *"DPkg::Lock::Timeout="* ]]; }; then
             if [ "${LC_ALL:-}" != C ] && [[ "${LANG:-}" == ru* ]]; then
                 printf 'E: Не удалось получить доступ к файлу блокировки /var/lib/dpkg/lock-frontend\n'
@@ -423,6 +429,41 @@ test_held_dpkg_lock_does_not_multiply_waits() {
     [ "$status" = 1 ] || fail "a held dpkg lock must fail the installation, got $status"
     [ "$(count_apt install)" = 1 ] || fail "one installation call expected while the lock is held: $(cat "$APT_LOG")"
     refute_msg "Packages installed successfully"
+
+    # The lock is taken during the retries one by one: the remaining packages are not tried.
+    reset_state
+    COMMON_APT_INDEX_FRESH=1
+    printf 'a\n' > "$MOCK_STATE/install_fail"
+    printf '1\n' > "$MOCK_STATE/install_lock_after"
+    status="$(run_status common_safe_install a b c)"
+    [ "$status" = 1 ] || fail "a lock taken during the retries must fail the installation, got $status"
+    [ "$(count_apt install)" = 2 ] || fail "the batch and one retry expected, then no more waits: $(cat "$APT_LOG")"
+    assert_msg "Package installation incomplete: a b c"
+}
+
+test_install_from_release() {
+    local status
+
+    reset_state
+    printf 'kernel 2.0~bpo12+1\nheaders 2.0~bpo12+1\n' > "$MOCK_STATE/dpkg_versions"
+    common_install_from_release bookworm-backports kernel headers || fail "packages installed from the release must succeed"
+    grep -q -- "install -y -t bookworm-backports kernel headers$" "$APT_LOG" || fail "the release must go to apt-get: $(cat "$APT_LOG")"
+
+    # apt-get succeeded, but the installed version is not the release's one.
+    reset_state
+    printf 'kernel 1.0\nheaders 2.0~bpo12+1\n' > "$MOCK_STATE/dpkg_versions"
+    status="$(run_status common_install_from_release bookworm-backports kernel headers)"
+    [ "$status" = 1 ] || fail "a version from another release must fail, got $status"
+
+    # The installation itself failed.
+    reset_state
+    printf 'kernel 2.0~bpo12+1\nheaders 2.0~bpo12+1\n' > "$MOCK_STATE/dpkg_versions"
+    printf 'kernel\n' > "$MOCK_STATE/install_fail"
+    status="$(run_status common_install_from_release bookworm-backports kernel headers)"
+    [ "$status" = 1 ] || fail "a failed installation must fail, got $status"
+
+    status="$(run_status common_install_from_release bookworm-backports)"
+    [ "$status" = 1 ] || fail "packages are required, got $status"
 }
 
 test_package_installed_from() {
@@ -565,6 +606,7 @@ main() {
     test_update_waits_for_dpkg_lock
     test_held_dpkg_lock_does_not_multiply_waits
     test_package_installed_from
+    test_install_from_release
     test_update_lock_retry
     test_update_failure_report
     test_update_check_hook
