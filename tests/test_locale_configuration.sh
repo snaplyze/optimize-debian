@@ -22,14 +22,14 @@ test_locale_generation() (
     local locale_file="$TEST_DIR/locale.gen"
     local generated_locales=$'C\nC.utf8\nen_US.utf8\nru_RU.utf8'
     local generation_status=0
-    # shellcheck disable=SC2317 # Invoked by the sourced production helper.
+    # shellcheck disable=SC2317,SC2329 # Invoked by the sourced production helper.
     locale-gen() {
         [ "$LC_ALL" = C ] || fail "generation needs a valid LC_ALL"
         [ "$LANG" = C ] || fail "generation needs a valid LANG"
         [ "$*" = --keep-existing ] || fail "existing compiled locales must be preserved"
         return "$generation_status"
     }
-    # shellcheck disable=SC2317 # Invoked by the sourced production helper.
+    # shellcheck disable=SC2317,SC2329 # Invoked by the sourced production helper.
     locale() {
         [ "$*" = -a ] || fail "unexpected locale command: $*"
         printf '%s\n' "$generated_locales"
