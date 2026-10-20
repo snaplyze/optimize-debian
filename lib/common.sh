@@ -148,24 +148,30 @@ common_user_home() {
 common_safe_write_sudoers() {
     local target_file="${1:-}"
     local content="${2:-}"
+    local target_dir tmp_file visudo_bin
 
     [ -n "$target_file" ] && [ -n "$content" ] || return 1
 
-    mkdir -p "$(dirname "$target_file")"
-    printf '%s\n' "$content" > "$target_file"
-    chmod 440 "$target_file"
-
-    local visudo_bin
     visudo_bin="$(command -v visudo 2>/dev/null || true)"
     [ -n "$visudo_bin" ] || [ ! -x /usr/sbin/visudo ] || visudo_bin="/usr/sbin/visudo"
+    [ -n "$visudo_bin" ] && [ -x "$visudo_bin" ] || return 1
 
-    if [ -n "$visudo_bin" ] && [ -x "$visudo_bin" ]; then
-        if ! "$visudo_bin" -cf "$target_file" >/dev/null 2>&1; then
-            rm -f "$target_file"
-            return 2
-        fi
+    target_dir="$(dirname "$target_file")"
+    mkdir -p "$target_dir" || return 1
+    # sudo skips files whose names contain a dot, so the unchecked copy is never read as a rule.
+    tmp_file="$(mktemp "$target_dir/.$(basename "$target_file").XXXXXX" 2>/dev/null)" || return 1
+
+    if ! printf '%s\n' "$content" > "$tmp_file" || ! chmod 440 "$tmp_file"; then
+        rm -f "$tmp_file"
+        return 1
     fi
-
-    return 0
+    if ! "$visudo_bin" -cf "$tmp_file" >/dev/null 2>&1; then
+        rm -f "$tmp_file"
+        return 2
+    fi
+    if ! mv -fT "$tmp_file" "$target_file"; then
+        rm -f "$tmp_file"
+        return 1
+    fi
 }
 

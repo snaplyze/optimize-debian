@@ -18,7 +18,8 @@ fail() {
 }
 
 # Writes `declare -f` of each function named in $2 that the sourced files define,
-# one file per function in $1. A clean environment keeps the caller out of it.
+# one file per function in $1. A clean environment keeps the caller out of it; stdin is
+# /dev/null because bash with a socket on stdin and no SHLVL reads ~/.bashrc.
 dump_functions() {
     local out_dir="$1" names_file="$2"
     shift 2
@@ -36,7 +37,7 @@ dump_functions() {
                 declare -f "$fn" > "$out_dir/$fn"
             fi
         done < "$names_file"
-    ' _ "$out_dir" "$names_file" "$@" >/dev/null
+    ' _ "$out_dir" "$names_file" "$@" </dev/null >/dev/null
 }
 
 main() {
@@ -47,7 +48,7 @@ main() {
         lib_paths+=("$ROOT_DIR/$lib")
     done
     for lib in "${lib_paths[@]}"; do
-        env -i PATH="$PATH" bash -c 'source "$1"; compgen -A function' _ "$lib"
+        env -i PATH="$PATH" bash -c 'source "$1"; compgen -A function' _ "$lib" </dev/null
     done | sort -u > "$TEST_DIR/function_names"
     [ -s "$TEST_DIR/function_names" ] || fail "no functions found in ${LIBS[*]}"
 
