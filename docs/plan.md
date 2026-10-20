@@ -42,7 +42,7 @@
 | 7 | [DATA-2](#data-2) | P2 | Upgrade: бэкап не проверяется, нет пути восстановления | — | TODO | #10 |
 | 8 | [DATA-1](#data-1) | P2 | Upgrade: официальные источники старого релиза остаются | — | TODO | #11 |
 | 9 | [ARCH-1](#arch-1) | P2 | `safe_install` в мини-ПК и WSL2 сообщает успех при сбое | ARCH-2 | TODO | #13 |
-| 10 | [BUG-2](#bug-2) | P2 | Ядро из Debian Backports не ставится | ARCH-1 | TODO | #38 |
+| 10 | [BUG-2](#bug-2) | P2 | Ядро из Debian Backports не ставится | ARCH-1, BUG-1 | TODO | #38 |
 | 11 | [PERF-2](#perf-2) | P2 | Ожидание блокировки dpkg зависит от `fuser` | ARCH-1 | TODO | #14 |
 | 12 | [ARCH-6](#arch-6) | P2 | Хелперы вне `lib/` разошлись: `enrich_apt_components` и time-sync | ARCH-2 | TODO | #35 |
 | 13 | [SEC-1](#sec-1) | P2 | Сторонние инструменты ставятся без проверки целостности | — | TODO | #15 |
@@ -77,7 +77,7 @@
 - Решение: определить функцию в `optimize_mini_pc.sh` до защиты `OPTIMIZE_SOURCE_ONLY` (вариант VPS, `optimize_vps.sh:696`); объединение реализаций обновления индекса — в PERF-1. Трудоемкость S. Риск: низкий.
 - Границы: `optimize_mini_pc.sh`, `tests/`.
 - Результат: шаг ядра на Debian 12 не обрывается.
-- Приемка: тест — после `OPTIMIZE_SOURCE_ONLY=1 source` копии `optimize_mini_pc.sh` без `lib/` функция `run_apt_update_with_diagnostics` определена (`declare -F`); на одноразовой Debian 12 шаг ядра проходит без кода 127.
+- Приемка: тест — после `OPTIMIZE_SOURCE_ONLY=1 source` копии `optimize_mini_pc.sh` без `lib/` функция `run_apt_update_with_diagnostics` определена, с моком `apt-get` при успехе возвращает 0, при сбое — ненулевой код и сообщение с контекстом; на одноразовой Debian 12 шаг ядра проходит без кода 127.
 - Ход: следующий шаг — тест (сейчас падает), затем определение функции.
 
 #### CI-1
@@ -183,7 +183,7 @@
 - Доказательство: `optimize_vps.sh:1984`, `optimize_mini_pc.sh:1259`, `optimize_amnezia_host.sh:882` вызывают `safe_install -t bookworm-backports <ядро> <заголовки>`, а все три `safe_install` считают каждый аргумент пакетом (`optimize_vps.sh:528-570`, `optimize_mini_pc.sh:567-600`, `optimize_amnezia_host.sh:311-336`): `-t` и `bookworm-backports` отсеиваются как недоступные, `apt-get install` идет без `-t`, ядро берется из `bookworm`; amnezia уже установленный пакет пропускает (`dpkg -s`). Pin-ов APT в скриптах нет. Следом скрипты пишут «… Backports kernel … installed successfully».
 - Влияние: на Debian 12 остается стабильное ядро вместо Backports, вопреки README, `docs/` и AGENTS.md («Debian Backports kernel»).
 - Решение: поддержать целевой выпуск в `safe_install` — передавать `-t <выпуск>` в `apt-get install`, проверять доступность для этого выпуска, не пропускать установленный пакет, если в выпуске версия новее; сообщение об успехе — по факту установленной версии. Трудоемкость S–M. Риск: на Debian 12 обновится ядро — нужна перезагрузка (скрипты уже предупреждают).
-- Границы: общий `safe_install` в `lib/` после ARCH-1, три вызова, `tests/`.
+- Границы: общий `safe_install` в `lib/` после ARCH-1, три вызова, `tests/`; на мини-ПК проверка на Debian 12 возможна только после BUG-1 — обрыв на `optimize_mini_pc.sh:1257` идет раньше вызова на `:1259`.
 - Результат: на Debian 12 устанавливается ядро из `bookworm-backports`.
 - Приемка: тест с моком `apt-get`, записывающим аргументы, — `safe_install -t bookworm-backports linux-image-amd64` вызывает `apt-get install` с `-t bookworm-backports` и не называет `-t` и `bookworm-backports` недоступными пакетами; на одноразовой Debian 12 после запуска `apt-cache policy linux-image-amd64` показывает установленную версию из `bookworm-backports`.
 - Ход: следующий шаг — после ARCH-1 тест с моком `apt-get`.
