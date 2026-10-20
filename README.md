@@ -41,7 +41,7 @@
 - 👤 **Совместимость с app-checks** - целевой пользователь добавляется в группы `sudo` и `docker`
 - 👤 **Создание пользователя** - может создать нового operator user и добавить ему `authorized_keys` от invoking sudo user без дублей
 - 🔒 **Security baseline** - SSH hardening с выбором порта (`--ssh-port`), Fail2Ban для SSH (`backend = systemd`), UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"`, safe sudoers (`visudo -cf`), Loose `rp_filter = 2`
-- ⏱️ **Time sync preserve-first** - сохраняет уже рабочий `ntpsec`/`systemd-timesyncd`, не заменяет daemon без необходимости
+- ⏱️ **Time sync preserve-first** - сохраняет уже установленный `chrony`/`ntpsec`/`ntp`/`openntpd`/`systemd-timesyncd`, ставит `systemd-timesyncd` только если daemon'а нет
 - 📡 **Two-phase firewall** - `bootstrap` для первичной установки через app и `locked` после фиксации `8443/udp`
 - 🚫 **Без лишнего** - не ставит AmneziaWG/XRay вручную, не тянет Node.js/fnm, Go и heavy VPS tuning
 

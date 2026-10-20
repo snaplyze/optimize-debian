@@ -33,7 +33,7 @@
 - опциональная установка **vanilla Docker CE**
 - Docker deb822 source с `Architectures: $(dpkg --print-architecture)`
 - добавление выбранного пользователя в группу `docker`
-- сохранение уже работающего time sync daemon'а (`ntpsec`, `chrony`, `systemd-timesyncd`)
+- сохранение уже установленного time sync daemon'а (`chrony`, `ntpsec`, `ntp`, `openntpd`, `systemd-timesyncd`)
 
 ---
 
@@ -213,9 +213,10 @@ Docker публикует порты через собственные сете�
 
 ## Time sync
 
-Скрипт придерживается подхода **preserve-first**:
-- если на сервере уже работает `ntpsec`, `chrony` или `systemd-timesyncd`, он их не заменяет
-- если active daemon не найден, пытается включить `systemd-timesyncd`
+Скрипт придерживается подхода **preserve-first** (тот же общий шаг, что в VPS и мини-ПК):
+- если на сервере установлен `chrony`, `ntpsec`, `ntp`, `openntpd` или `systemd-timesyncd`, скрипт оставляет его и запускает, если он не активен; другой daemon не ставится — в Debian эти пакеты конфликтуют, и установка удалила бы уже настроенный
+- если не установлен ни один, ставит и включает `systemd-timesyncd`
+- затем включает NTP через `timedatectl set-ntp true` и сообщает, синхронизированы ли часы (`timedatectl show -p NTPSynchronized`)
 
 Это важно для cloud image / VPS образов, где time sync часто уже настроен корректно базовой системой.
 

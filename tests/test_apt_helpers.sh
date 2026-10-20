@@ -333,6 +333,119 @@ test_index_refreshed_once() {
     [ "$(count_apt update)" = 2 ] || fail "a failed refresh must be retried: $(cat "$APT_LOG")"
 }
 
+test_enrich_apt_components() {
+    local dir="$TEST_DIR/apt" status
+
+    reset_state
+    rm -rf "$dir"
+    mkdir -p "$dir/sources.list.d"
+    printf '%s\n' \
+        '# deb http://deb.debian.org/debian bookworm main' \
+        'deb http://deb.debian.org/debian bookworm main' \
+        'deb-src http://deb.debian.org/debian bookworm main  ' \
+        '	deb http://security.debian.org/debian-security bookworm-security main contrib # security' \
+        'deb [arch=amd64 signed-by=/k.gpg] https://download.docker.com/linux/debian bookworm stable' \
+        'deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware' \
+        > "$dir/sources.list"
+    printf 'deb http://deb.debian.org/debian bookworm-backports main non-free-firmware' > "$dir/sources.list.d/backports.list"
+    printf '%s\n' 'Types: deb deb-src' 'URIs: http://deb.debian.org/debian' 'Suites: bookworm' \
+        'Components: main' 'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' > "$dir/sources.list.d/debian.sources"
+    printf '%s\n' 'Types: deb' 'URIs: https://download.docker.com/linux/debian' 'Suites: bookworm' \
+        'Components: stable' > "$dir/sources.list.d/docker.sources"
+    cp -p "$dir/sources.list.d/docker.sources" "$TEST_DIR/docker.sources.before"
+    chmod 640 "$dir/sources.list"
+    COMMON_APT_INDEX_FRESH=1
+
+    common_enrich_apt_sources "$dir" || fail "enrichment of readable sources must succeed"
+
+    [ "$(cat "$dir/sources.list")" = "$(printf '%s\n' \
+        '# deb http://deb.debian.org/debian bookworm main' \
+        'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware' \
+        'deb-src http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware' \
+        '	deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware # security' \
+        'deb [arch=amd64 signed-by=/k.gpg] https://download.docker.com/linux/debian bookworm stable' \
+        'deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware')" ] || \
+        fail "one-line sources with main get the missing components before a comment: $(cat "$dir/sources.list")"
+    [ "$(stat -c %a "$dir/sources.list")" = 640 ] || fail "the rewritten file must keep its mode"
+    [ "$(cat "$dir/sources.list.d/backports.list")" = \
+        'deb http://deb.debian.org/debian bookworm-backports main non-free-firmware contrib non-free' ] || \
+        fail "a last line without a newline must be enriched: $(cat "$dir/sources.list.d/backports.list")"
+    grep -qx 'Components: main contrib non-free non-free-firmware' "$dir/sources.list.d/debian.sources" || \
+        fail "deb822 Components with main must be enriched: $(cat "$dir/sources.list.d/debian.sources")"
+    grep -qx 'Types: deb deb-src' "$dir/sources.list.d/debian.sources" || fail "other deb822 fields must stay"
+    cmp -s "$dir/sources.list.d/docker.sources" "$TEST_DIR/docker.sources.before" || \
+        fail "a source without main must stay as it is: $(cat "$dir/sources.list.d/docker.sources")"
+    refute_msg "docker.sources"
+    [ "${COMMON_APT_INDEX_FRESH:-0}" = 0 ] || fail "a changed source must reset the index mark"
+    [ -z "$(find "$dir" -name '.*' -type f)" ] || fail "no temporary file may stay behind: $(find "$dir" -name '.*' -type f)"
+
+    # A second run finds nothing to add: no file is written and the index stays fresh.
+    : > "$MSGS"
+    cp -p "$dir/sources.list" "$TEST_DIR/sources.list.before"
+    COMMON_APT_INDEX_FRESH=1
+    common_enrich_apt_sources "$dir" || fail "a repeated enrichment must succeed"
+    cmp -s "$dir/sources.list" "$TEST_DIR/sources.list.before" || fail "a repeated enrichment must not change the file"
+    refute_msg "Updating APT source file"
+    [ "$COMMON_APT_INDEX_FRESH" = 1 ] || fail "an unchanged source must not reset the index mark"
+
+    # A missing file is not an error.
+    common_enrich_apt_components "$dir/missing.list" || fail "a missing file must be skipped"
+
+    # The temporary file cannot be created: the source stays as it was.
+    printf 'deb http://deb.debian.org/debian bookworm main\n' > "$dir/sources.list"
+    : > "$MSGS"
+    # shellcheck disable=SC2329 # Invoked by the lib function under test.
+    status="$(mktemp() { return 1; }; run_status common_enrich_apt_components "$dir/sources.list")"
+    [ "$status" = 1 ] || fail "a failed mktemp must fail the enrichment, got $status"
+    assert_msg "Failed to allocate temporary file while updating $dir/sources.list"
+    [ "$(cat "$dir/sources.list")" = 'deb http://deb.debian.org/debian bookworm main' ] || fail "the source must stay unchanged"
+
+    # The source cannot be replaced: it stays complete and no temporary file is left.
+    : > "$MSGS"
+    COMMON_APT_INDEX_FRESH=1
+    # shellcheck disable=SC2329 # Invoked by the lib function under test.
+    status="$(mv() { return 1; }; run_status common_enrich_apt_components "$dir/sources.list")"
+    [ "$status" = 1 ] || fail "a failed write must fail the enrichment, got $status"
+    assert_msg "Failed to write updated APT source file: $dir/sources.list"
+    [ "$(cat "$dir/sources.list")" = 'deb http://deb.debian.org/debian bookworm main' ] || \
+        fail "a failed write must leave the source as it was: $(cat "$dir/sources.list")"
+    [ -z "$(find "$dir" -name '.*' -type f)" ] || fail "a failed write must not leave a temporary file"
+
+    # The source cannot be read (as root every file is readable, so the case needs a user).
+    if [ "$(id -u)" -eq 0 ]; then
+        printf 'SKIP: unreadable APT source case: running as root\n'
+    else
+        : > "$MSGS"
+        chmod 000 "$dir/sources.list"
+        status="$(run_status common_enrich_apt_components "$dir/sources.list" 2>/dev/null)"
+        chmod 644 "$dir/sources.list"
+        [ "$status" = 1 ] || fail "an unreadable source must fail the enrichment, got $status"
+        assert_msg "Failed to read APT source file: $dir/sources.list"
+    fi
+}
+
+test_enrich_apt_sources_visits_every_file() {
+    local dir="$TEST_DIR/apt-visit" status
+
+    reset_state
+    rm -rf "$dir"
+    mkdir -p "$dir/sources.list.d"
+    : > "$dir/sources.list"
+    : > "$dir/sources.list.d/a.list"
+    : > "$dir/sources.list.d/b.list"
+    : > "$dir/sources.list.d/c.sources"
+    : > "$dir/sources.list.d/ignored.list.save"
+    # One file fails: the others are still processed and the result is 1.
+    status="$(
+        # shellcheck disable=SC2329 # Invoked by common_enrich_apt_sources.
+        common_enrich_apt_components() { printf '%s\n' "${1#"$dir"/}" >> "$MOCK_STATE/visited"; [ "$1" != "$dir/sources.list.d/a.list" ]; }
+        run_status common_enrich_apt_sources "$dir"
+    )"
+    [ "$status" = 1 ] || fail "a failed file must fail the enrichment, got $status"
+    [ "$(cat "$MOCK_STATE/visited")" = "$(printf '%s\n' sources.list sources.list.d/a.list sources.list.d/b.list sources.list.d/c.sources)" ] || \
+        fail "every source file must be visited: $(cat "$MOCK_STATE/visited")"
+}
+
 test_lock_timeout_option_and_no_fuser() {
     local pathbin tool status
 
@@ -610,6 +723,8 @@ main() {
     test_update_lock_retry
     test_update_failure_report
     test_update_check_hook
+    test_enrich_apt_components
+    test_enrich_apt_sources_visits_every_file
     printf 'tests/test_apt_helpers.sh: OK\n'
 }
 

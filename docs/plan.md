@@ -44,7 +44,7 @@
 | 9 | [ARCH-1](#arch-1) | P2 | `safe_install` в мини-ПК и WSL2 сообщает успех при сбое | ARCH-2 | DONE | #13 |
 | 10 | [BUG-2](#bug-2) | P2 | Ядро из Debian Backports не ставится | ARCH-1, BUG-1 | DONE | #38 |
 | 11 | [PERF-2](#perf-2) | P2 | Ожидание блокировки dpkg зависит от `fuser` | ARCH-1 | DONE | #14 |
-| 12 | [ARCH-6](#arch-6) | P2 | Хелперы вне `lib/` разошлись: `enrich_apt_components` и time-sync | ARCH-2 | TODO | #35 |
+| 12 | [ARCH-6](#arch-6) | P2 | Хелперы вне `lib/` разошлись: `enrich_apt_components` и time-sync | ARCH-2 | DONE | #35 |
 | 13 | [SEC-1](#sec-1) | P2 | Сторонние инструменты ставятся без проверки целостности | — | TODO | #15 |
 | 14 | [DEL-1](#del-1) | P2 | VPS, мини-ПК и WSL2 исполняются по мере загрузки | — | TODO | #16 |
 | 15 | [TEST-1](#test-1) | P2 | Рискованные пути без поведенческих тестов | — | DONE | #17 |
@@ -213,7 +213,7 @@
 - Границы: `lib/common.sh`, `enrich_*` и time-sync-функции в `optimize_*.sh`, `tests/`.
 - Результат: одна реализация этих хелперов.
 - Приемка: тесты поведения хелперов в `lib/` (строки `deb` и `deb-src`, сбой `mktemp`, коды возврата time-sync); копии совпадают с `lib/` (тест ARCH-2).
-- Ход: следующий шаг — проверить Г-2, затем тесты поведения.
+- Ход: выполнено — Г-2 проверена на Debian 12 (systemd 252) и 13 (systemd 257) с запущенным systemd: у `timedatectl show` нет свойства `SystemClockSynchronized` (пустой ответ), поэтому VPS и мини-ПК всегда считали часы несинхронизированными; верное свойство — `NTPSynchronized`. Остановки по `set -e` нет — вызовы идут с `|| true`. В `lib/common.sh` одна реализация: `common_enrich_apt_components` и `common_enrich_apt_sources` (строки `deb` и `deb-src`, поле `Components` deb822 только у источников с `main` — Docker `stable` больше не получает чужих компонентов; комментарий в конце строки сохраняется; файл переписывается только при изменении — через временный файл в том же каталоге с правами и владельцем исходного и `mv`, поэтому сбой записи оставляет источник целым (раньше deb822 правился `sed -i`, а однострочный — `cat >`); после записи сбрасывается отметка индекса; сбой `mktemp`, чтения и записи — код 1 с сообщением), `common_systemd_running`, `common_system_clock_synchronized`, `common_ensure_time_sync_service`, `common_enable_time_sync` (контракт VPS: установленная служба сохраняется и запускается, `systemd-timesyncd` ставится, только если служб нет, после обновления индекса — шаг time-sync в VPS идет раньше первого обновления; вариант Amnezia ставил его при неактивном chrony, а в Debian эти пакеты конфликтуют). Копии — в VPS, мини-ПК, WSL2 (обогащение) и VPS, мини-ПК, Amnezia (time-sync); прежние функции скриптов удалены, гигиена запрещает их имена. Проверка: `tests/test_apt_helpers.sh` и новый `tests/test_time_sync.sh`, 30 мутаций — FAIL; независимое ревью нашло неатомарную запись и непойманную ошибку чтения — исправлено; на Debian 12 (контейнеры) `debian.sources` получил компоненты с прежними правами, `docker.sources` не изменился, `apt-get update` прошел и видит contrib/non-free, повторный запуск ничего не пишет; `common_enable_time_sync` с systemd вернул 0; `systemctl list-unit-files` для отсутствующего юнита возвращает 1 на Debian 12 и 13. Сторонние однострочные источники с `main` по-прежнему получают компоненты Debian (apt выводит уведомление, не ошибку). Не проверено: в контейнере `systemd-timesyncd` пропускается условием `ConditionVirtualization=!container`, на VM запуск не проверялся.
 
 #### SEC-1
 
@@ -462,7 +462,7 @@
 Не подтверждены — задачами не стали. Проверяются на одноразовой Debian 12/13, если не сказано иное.
 
 - Г-1. VPS и мини-ПК ставят пакеты без `DEBIAN_FRONTEND=noninteractive` (его задают только для `apt-get upgrade`: `optimize_vps.sh:1880`, `optimize_mini_pc.sh:966`; WSL2 экспортирует глобально, `optimize_wsl2.sh:17`), а вывод `apt-get install` уходит в `/dev/null` — вопрос debconf может повесить шаг невидимо. Проверка: установка списков пакетов скриптов в чистом контейнере Debian с `DEBIAN_PRIORITY=high` без `DEBIAN_FRONTEND`, затем `debconf-show` для установленных пакетов.
-- Г-2. Разные контракты time-sync (ARCH-6): `SystemClockSynchronized` против `NTPSynchronized` и код 1 без systemd в VPS и мини-ПК — под `set -e` может остановить скрипт. Проверка: `timedatectl show -p SystemClockSynchronized -p NTPSynchronized` и запуск без `systemd-timesyncd`.
+- Г-2. Проверена в ARCH-6 на Debian 12 и 13: первая часть подтверждена — свойства `SystemClockSynchronized` нет, исправлено на `NTPSynchronized`; вторая опровергнута — вызовы time-sync идут с `|| true`, `set -e` скрипт не останавливает.
 - Г-3. Подтверждено замером PERF-1 на Debian 12: 13 лишних `apt-get update` стоили около 9 с на 13 небольших установок; на полном прогоне VPS, вероятно, больше — полный прогон не замерялся.
 - Г-4. Действующий `nofile` на VPS — 65535: pam_limits читает `limits.d` после `limits.conf` (man pam_limits, Debian bookworm), а по коду pam_limits последняя запись того же уровня побеждает. Проверка: `ulimit -n` после входа.
 - Г-5. В официальном образе `debian:12` `fuser` нет (`psmisc` — `Priority: optional`); облачные образы не проверены. После PERF-2 скрипты от `fuser` не зависят, гипотеза больше ни на что не влияет.
