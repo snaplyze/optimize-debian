@@ -80,32 +80,6 @@ test_release_and_firewall_helpers() {
     '
 }
 
-test_package_available_helper() {
-    # The mock answers only for "apt-cache policy <name>" with a known name, so
-    # a regression that asks about the wrong package or uses other arguments
-    # makes package_available return false and the test fail.
-    run_case '
-        apt-cache() {
-            [ "$#" -eq 2 ] && [ "$1" = policy ] || { printf "unexpected apt-cache args: %s\n" "$*" >&2; return 2; }
-            case "$2" in
-                sample)
-                    printf "sample:\n  Installed: (none)\n  Candidate: 1.2.3\n"
-                    ;;
-                missing)
-                    printf "missing:\n  Installed: (none)\n  Candidate: (none)\n"
-                    ;;
-                *)
-                    return 0
-                    ;;
-            esac
-        }
-
-        package_available sample || die "package with a candidate must be available"
-        ! package_available missing || die "package_available must reject Candidate: (none)"
-        ! package_available unknown-package || die "package_available must reject a package apt-cache does not know"
-    '
-}
-
 test_existing_user_requires_authorized_keys_before_hardening() {
     run_case '
         TARGET_USER=sample
@@ -489,9 +463,9 @@ test_target_user_privileges() {
 
 test_base_packages_include_fail2ban_journal_backend() {
     run_case '
-        run_apt_update_with_diagnostics() { event "apt-update $1"; }
-        apt-get() { event "apt-get $*"; }
-        safe_install() { event "safe_install $*"; }
+        common_apt_update() { event "apt-update $1"; }
+        common_apt_get() { event "apt-get $*"; }
+        common_safe_install() { event "safe_install $*"; }
 
         install_base_packages >/dev/null
         assert_event_matches "^safe_install .*(^| )python3-systemd( |$)"
@@ -894,8 +868,9 @@ test_docker_repository_and_packages() {
         curl() { event "curl $*"; printf "KEYDATA\n"; }
         gpg() { event "gpg $*"; cat > /dev/null; : > "$3"; }
         dpkg() { printf "amd64\n"; }
-        run_apt_update_with_diagnostics() { event "apt-update $1"; }
-        safe_install() { event "safe_install $*"; }
+        common_apt_sources_changed() { event "apt-sources-changed"; }
+        common_apt_update() { event "apt-update $1"; }
+        common_safe_install() { event "safe_install $*"; }
         systemd_system_available() { return 1; }
         groupadd() { event "groupadd $*"; }
         ensure_target_user_privileges() { event ensure_target_user_privileges; }
@@ -908,7 +883,8 @@ test_docker_repository_and_packages() {
             grep -Fxq "$line" "$DOCKER_SOURCES_FILE" || die "docker.sources lacks: $line"
         done
         assert_event "safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
-        assert_before "gpg --dearmor -o $DOCKER_KEYRING" "apt-update Docker repository refresh"
+        assert_before "gpg --dearmor -o $DOCKER_KEYRING" "apt-sources-changed"
+        assert_before "apt-sources-changed" "apt-update Docker repository refresh"
         assert_before "apt-update Docker repository refresh" "safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
         assert_before "groupadd -f docker" ensure_target_user_privileges
 
@@ -917,6 +893,47 @@ test_docker_repository_and_packages() {
         run_status install_docker_ce
         assert_rc 0 "install_docker_ce, second run"
         assert_no_event_matches "^curl"
+    '
+}
+
+test_backports_kernel_comes_from_backports() {
+    run_case '
+        INSTALL_KERNEL_BACKPORTS=true
+        BACKPORTS_SOURCES_FILE="$T/debian-backports.sources"
+        detect_debian_version() { printf "12\n"; }
+        dpkg() {
+            case "$1" in
+                --print-architecture) printf "amd64\n" ;;
+                -s) event "dpkg $*" ;;
+            esac
+        }
+        common_apt_sources_changed() { event "apt-sources-changed"; }
+        common_apt_update() { event "apt-update $1"; }
+        common_safe_install() { event "safe_install $*"; }
+        common_package_installed_from() { event "installed-from $*"; }
+
+        run_status install_backports_kernel
+        assert_rc 0 "install_backports_kernel"
+        grep -Fxq "Suites: bookworm-backports" "$BACKPORTS_SOURCES_FILE" || die "backports source not written"
+        assert_event "safe_install -t bookworm-backports linux-image-amd64 linux-headers-amd64"
+        assert_before "apt-sources-changed" "apt-update Backports repository refresh"
+        assert_before "apt-update Backports repository refresh" "safe_install -t bookworm-backports linux-image-amd64 linux-headers-amd64"
+        assert_out "installed successfully" "success is reported when the install worked"
+        assert_event "installed-from bookworm-backports linux-image-amd64 linux-headers-amd64"
+
+        # Not installed, or installed but not in the Backports version: an error, not a success message.
+        common_package_installed_from() { return 1; }
+        run_status install_backports_kernel
+        assert_failed "a kernel that did not come from Backports must fail the step"
+        assert_no_out "installed successfully" "kernel from the default release"
+        common_package_installed_from() { event "installed-from $*"; }
+
+        # A failed installation is an error, not a success message.
+        common_safe_install() { return 1; }
+        run_status install_backports_kernel
+        assert_failed "a failed Backports kernel installation must fail the step"
+        assert_no_out "installed successfully" "failure"
+
     '
 }
 
@@ -929,7 +946,7 @@ test_fish_and_starship_setup() {
         user_home_for() { printf "%s\n" "$HOME_DIR"; }
         install() { event "install $*"; mkdir -p "${@: -1}"; }
         chown() { event "chown $*"; }
-        safe_install() { event "safe_install $*"; }
+        common_safe_install() { event "safe_install $*"; }
         fish() { :; }
         starship() { event "starship $*"; if [ "$*" = "preset nerd-font-symbols" ]; then printf "# nerd-font-symbols preset\n"; fi; }
 
@@ -1057,7 +1074,6 @@ test_docs_are_wired() {
 
 main() {
     test_release_and_firewall_helpers
-    test_package_available_helper
     test_existing_user_requires_authorized_keys_before_hardening
     test_parse_args_target_user_resolution
     test_parse_args_rejects_invalid_input
@@ -1078,6 +1094,7 @@ main() {
     test_sysctl_baseline
     test_swap_baseline
     test_docker_repository_and_packages
+    test_backports_kernel_comes_from_backports
     test_fish_and_starship_setup
     test_main_step_order
     test_script_stays_minimal

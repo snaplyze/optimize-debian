@@ -15,8 +15,6 @@ set -Eeuo pipefail
 
 SCRIPT_VERSION="4.0"
 export DEBIAN_FRONTEND=noninteractive
-APT_UPDATED=0
-APT_INSTALL_OPTS=(-y -o Dpkg::Use-Pty=0 -o Acquire::Retries=3)
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_PATH="$(readlink -f "$SCRIPT_SOURCE" 2>/dev/null || printf '%s' "$SCRIPT_SOURCE")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -194,6 +192,200 @@ EOF
         if ! mv -fT "$tmp_file" "$target_file"; then
             rm -f "$tmp_file"
             return 1
+        fi
+    }
+fi
+
+if ! declare -F common_apt_get >/dev/null; then
+    # apt-get without prompts. DPkg::Lock::Timeout makes apt wait for the dpkg lock held by
+    # another package manager instead of failing; apt does the waiting itself and covers the dpkg locks
+    # only (apt-get update takes the lists lock, see common_apt_update).
+    common_apt_get() {
+        DEBIAN_FRONTEND=noninteractive apt-get \
+            -o "DPkg::Lock::Timeout=${COMMON_APT_LOCK_TIMEOUT:-300}" \
+            -o Acquire::Retries=3 -o Dpkg::Use-Pty=0 "$@"
+    }
+
+    # Refreshes the APT index once per run: later calls return 0 until common_apt_sources_changed.
+    # First waits for the dpkg lock with an install of no packages: apt-get update does not take
+    # that lock and would break the download of an installation running in another process.
+    # Returns 75 when that lock is still held after COMMON_APT_LOCK_TIMEOUT seconds.
+    # Retries while another process holds the lists lock, within COMMON_APT_UPDATE_ATTEMPTS
+    # attempts and COMMON_APT_LOCK_TIMEOUT seconds. COMMON_APT_UPDATE_CHECK may name a function
+    # that receives the apt output and returns non-zero to reject an update apt itself accepted.
+    common_apt_update() {
+        local context="${1:-package index refresh}"
+        local timeout="${COMMON_APT_LOCK_TIMEOUT:-300}"
+        local delay="${COMMON_APT_UPDATE_RETRY_DELAY:-10}"
+        local max_attempts="${COMMON_APT_UPDATE_ATTEMPTS:-30}"
+        local started="$SECONDS"
+        local attempt=1
+        local output status
+
+        if [ "${COMMON_APT_INDEX_FRESH:-0}" = 1 ]; then
+            return 0
+        fi
+
+        progress "Refreshing APT package index..."
+        status=0
+        output="$(LC_ALL=C common_apt_get install -y 2>&1)" || status=$?
+        if [ "$status" -ne 0 ]; then
+            log_silent "$output"
+            if grep -q 'Could not get lock' <<<"$output"; then
+                error "apt-get update failed during: $context (dpkg lock is still held)"
+                printf '%s\n' "$output" | head -n 10 | sed 's/^/    /' || true
+                return 75
+            fi
+        fi
+        while :; do
+            status=0
+            output="$(LC_ALL=C common_apt_get update 2>&1)" || status=$?
+            log_silent "$output"
+            if [ "$status" -eq 0 ] && [ -n "${COMMON_APT_UPDATE_CHECK:-}" ]; then
+                "$COMMON_APT_UPDATE_CHECK" "$output" || status=$?
+            fi
+            if [ "$status" -eq 0 ]; then
+                COMMON_APT_INDEX_FRESH=1
+                return 0
+            fi
+
+            if grep -Eq 'Could not get lock [^ ]*/lists/lock|Unable to lock directory [^ ]*/lists/' <<<"$output" \
+                && [ "$attempt" -lt "$max_attempts" ] \
+                && [ $((SECONDS - started + delay)) -le "$timeout" ]; then
+                if [ "$attempt" -eq 1 ]; then
+                    info "APT package lists are locked by another process, waiting for it..."
+                fi
+                sleep "$delay"
+                attempt=$((attempt + 1))
+                continue
+            fi
+
+            error "apt-get update failed during: $context"
+            printf '%s\n' "$output" | head -n 10 | sed 's/^/    /' || true
+            return "$status"
+        done
+    }
+
+    # Call after every change to APT sources or keys so the next common_apt_update refreshes the index.
+    common_apt_sources_changed() {
+        COMMON_APT_INDEX_FRESH=0
+    }
+
+    # common_package_available <package> [release]: the package has an install candidate or,
+    # when a release is named, a version in that release. `apt-cache -t <release> policy` is not
+    # enough: it only raises the release's priority and still shows the default candidate.
+    common_package_available() {
+        local package="${1:-}"
+        local release="${2:-}"
+        local policy candidate
+
+        [ -n "$package" ] || return 1
+        if [ -n "$release" ]; then
+            LC_ALL=C apt-cache madison "$package" 2>/dev/null | \
+                awk -F'|' -v suite=" ${release}/" 'index($3, suite) { found = 1 } END { exit !found }'
+            return
+        fi
+        policy="$(LC_ALL=C apt-cache policy "$package" 2>/dev/null)" || return 1
+        candidate="$(sed -n '/^[[:space:]]*Candidate:/{s/^[^:]*:[[:space:]]*//;p;q;}' <<<"$policy")"
+        [ -n "$candidate" ] && [ "$candidate" != "(none)" ]
+    }
+
+    # common_package_installed_from <release> <package>...: every package is installed in a
+    # version that the release provides.
+    common_package_installed_from() {
+        local release="${1:-}"
+        local package version
+        shift || true
+
+        [ -n "$release" ] && [ $# -gt 0 ] || return 1
+        for package in "$@"; do
+            version="$(dpkg-query -W -f='${Version}' "$package" 2>/dev/null)" || return 1
+            [ -n "$version" ] || return 1
+            LC_ALL=C apt-cache madison "$package" 2>/dev/null | \
+                awk -F'|' -v suite=" ${release}/" -v version="$version" \
+                    'index($3, suite) { gsub(/[[:space:]]/, "", $2); if ($2 == version) found = 1 } END { exit !found }' || return 1
+        done
+    }
+
+    # common_safe_install [-t release] <package>...: installs the available packages in one
+    # apt-get call, retrying one by one when it fails. Unavailable packages only produce a
+    # warning; returns 1 when an available package could not be installed. With -t the
+    # packages come from that release and an installed package is upgraded to its version.
+    common_safe_install() {
+        local release=""
+        local packages=()
+        local available_packages=()
+        local unavailable_packages=()
+        local failed_packages=()
+        local install_args=(install -y)
+        local pkg output status
+
+        if [ "${1:-}" = "-t" ]; then
+            if [ -z "${2:-}" ]; then
+                error "common_safe_install: -t needs a release name"
+                return 1
+            fi
+            release="$2"
+            install_args+=(-t "$release")
+            shift 2
+        fi
+        packages=("$@")
+        [ ${#packages[@]} -gt 0 ] || return 0
+
+        status=0
+        common_apt_update "installing: ${packages[*]}" || status=$?
+        if [ "$status" -eq 75 ]; then
+            error "Not installing ${packages[*]}: another package manager still holds the dpkg lock"
+            return 1
+        elif [ "$status" -ne 0 ]; then
+            warn "Continuing with the existing APT package index"
+        fi
+
+        for pkg in "${packages[@]}"; do
+            if common_package_available "$pkg" "$release"; then
+                available_packages+=("$pkg")
+            else
+                unavailable_packages+=("$pkg")
+            fi
+        done
+
+        if [ ${#available_packages[@]} -gt 0 ]; then
+            progress "Installing ${#available_packages[@]} packages..."
+            status=0
+            output="$(LC_ALL=C common_apt_get "${install_args[@]}" "${available_packages[@]}" 2>&1)" || status=$?
+            log_silent "$output"
+            if [ "$status" -ne 0 ] && grep -q 'Could not get lock' <<<"$output"; then
+                # Retrying one by one would wait for the same lock once per package.
+                error "Not installing ${available_packages[*]}: another package manager still holds the dpkg lock"
+                failed_packages=("${available_packages[@]}")
+            elif [ "$status" -ne 0 ]; then
+                for pkg in "${available_packages[@]}"; do
+                    if [ ${#failed_packages[@]} -gt 0 ] && grep -q 'Could not get lock' <<<"$output"; then
+                        # The lock was taken meanwhile: the remaining packages would wait for it in turn.
+                        failed_packages+=("$pkg")
+                        continue
+                    fi
+                    status=0
+                    output="$(LC_ALL=C common_apt_get "${install_args[@]}" "$pkg" 2>&1)" || status=$?
+                    log_silent "$output"
+                    if [ "$status" -ne 0 ]; then
+                        failed_packages+=("$pkg")
+                        warn "Failed to install: $pkg"
+                        printf '%s\n' "$output" | tail -n 5 | sed 's/^/    /' || true
+                    fi
+                done
+            fi
+        fi
+
+        if [ ${#unavailable_packages[@]} -gt 0 ]; then
+            warn "Unavailable packages${release:+ in $release}: ${unavailable_packages[*]}"
+        fi
+        if [ ${#failed_packages[@]} -gt 0 ]; then
+            warn "Package installation incomplete: ${failed_packages[*]}"
+            return 1
+        fi
+        if [ ${#available_packages[@]} -gt 0 ]; then
+            log "Packages installed successfully${release:+ from $release}"
         fi
     }
 fi
@@ -427,6 +619,13 @@ LOG_FILE="/var/log/wsl2_optimization.log"
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Log to file only (silent)
+# APT helper settings are fixed here: a root shell's environment must not change them.
+COMMON_APT_LOCK_TIMEOUT=300
+COMMON_APT_UPDATE_RETRY_DELAY=10
+COMMON_APT_UPDATE_ATTEMPTS=30
+COMMON_APT_UPDATE_CHECK=""
+COMMON_APT_INDEX_FRESH=0
+
 log_silent() {
     [ -n "${LOG_FILE:-}" ] || return 0
     local log_dir
@@ -666,35 +865,21 @@ restore_linux_home_path_ownership() {
     fi
 }
 
-apt_update_once() {
-    wait_for_dpkg_lock || return 1
-    if [ "$APT_UPDATED" -eq 0 ]; then
-        local apt_output
-        local apt_status
+# WSL-specific review of the apt-get update output, run by common_apt_update through
+# COMMON_APT_UPDATE_CHECK: repository verification errors reject the refresh, and a WSL
+# clock that is out of sync gets a hint.
+wsl_apt_update_check() {
+    local apt_output="$1"
 
-        progress "Refreshing APT package index..."
-        apt_output=$(apt-get update 2>&1) && apt_status=0 || apt_status=$?
-        log_silent "$apt_output"
-
-        if [ $apt_status -ne 0 ]; then
-            error "APT package index refresh failed"
-            if [ -n "$apt_output" ]; then
-                echo -e "    ${DIM}${apt_output}${NC}" | head -5
-            fi
-            return $apt_status
+    if printf '%s\n' "$apt_output" | grep -Eqi '(^W: Failed to fetch|An error occurred during the signature verification|OpenPGP signature verification failed|EXPKEYSIG|NO_PUBKEY|not live until)'; then
+        warn "APT package index refresh completed with repository verification errors"
+        if printf '%s\n' "$apt_output" | grep -Eqi 'not live until'; then
+            warn "WSL clock appears out of sync. Run 'wsl --shutdown' in Windows, reopen WSL, verify the current time, then rerun the script."
         fi
-
-        if printf '%s\n' "$apt_output" | grep -Eqi '(^W: Failed to fetch|An error occurred during the signature verification|OpenPGP signature verification failed|EXPKEYSIG|NO_PUBKEY|not live until)'; then
-            warn "APT package index refresh completed with repository verification errors"
-            if printf '%s\n' "$apt_output" | grep -Eqi 'not live until'; then
-                warn "WSL clock appears out of sync. Run 'wsl --shutdown' in Windows, reopen WSL, verify the current time, then rerun the script."
-            fi
-            return 1
-        fi
-
-        APT_UPDATED=1
+        return 1
     fi
 }
+COMMON_APT_UPDATE_CHECK=wsl_apt_update_check
 
 run_as_user() {
     local username="$1"
@@ -703,88 +888,6 @@ run_as_user() {
         "$@"
     else
         su - "$username" -c "$(printf '%q ' "$@")"
-    fi
-}
-
-# Wait for dpkg/apt lock to be released
-wait_for_dpkg_lock() {
-    local max_wait=300
-    local wait_time=0
-    local check_interval=2
-
-    while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
-          fuser /var/lib/dpkg/lock >/dev/null 2>&1 || \
-          fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
-
-        if [ $wait_time -ge $max_wait ]; then
-            error "Timeout waiting for dpkg lock after ${max_wait}s"
-            return 1
-        fi
-
-        if [ $wait_time -eq 0 ]; then
-            info "Waiting for other package managers to finish..."
-        fi
-
-        sleep $check_interval
-        wait_time=$((wait_time + check_interval))
-    done
-
-    [ $wait_time -gt 0 ] && sleep 1
-    return 0
-}
-
-# Check if package is available in repositories
-package_available() {
-    local pkg="$1"
-
-    LC_ALL=C apt-cache show --no-all-versions "$pkg" >/dev/null 2>&1 && return 0
-
-    LC_ALL=C apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate:[[:space:]]*(none)" && return 1
-    LC_ALL=C apt-cache policy "$pkg" 2>/dev/null | grep -q "Candidate:" && return 0
-
-    return 1
-}
-
-# Safe package installation with availability check (silent output)
-safe_install() {
-    local packages=("$@")
-    local available_packages=()
-    local unavailable_packages=()
-    local failed_packages=()
-
-    wait_for_dpkg_lock || return 1
-
-    # Update package index once per run
-    apt_update_once || return 1
-    
-    for pkg in "${packages[@]}"; do
-        if package_available "$pkg"; then
-            available_packages+=("$pkg")
-        else
-            unavailable_packages+=("$pkg")
-        fi
-    done
-    
-    if [ ${#available_packages[@]} -gt 0 ]; then
-        progress "Installing ${#available_packages[@]} packages..."
-        if ! apt-get install "${APT_INSTALL_OPTS[@]}" "${available_packages[@]}" >/dev/null 2>&1; then
-            # Retry with individual packages on failure
-            for pkg in "${available_packages[@]}"; do
-                if ! apt-get install "${APT_INSTALL_OPTS[@]}" "$pkg" >/dev/null 2>&1; then
-                    failed_packages+=("$pkg")
-                    warn "Failed to install: $pkg"
-                fi
-            done
-        fi
-        if [ ${#failed_packages[@]} -eq 0 ]; then
-            log "Packages installed successfully"
-        else
-            warn "Package installation incomplete: ${failed_packages[*]}"
-        fi
-    fi
-    
-    if [ ${#unavailable_packages[@]} -gt 0 ]; then
-        warn "Unavailable packages: ${unavailable_packages[*]}"
     fi
 }
 
@@ -814,11 +917,9 @@ resolve_fetch_packages() {
         return 0
     fi
 
-    apt_update_once >/dev/null 2>&1 || true
-
-    if package_available fastfetch; then
+    if common_package_available fastfetch; then
         printf '%s\n' "fastfetch"
-    elif package_available neofetch; then
+    elif common_package_available neofetch; then
         printf '%s\n' "neofetch"
     fi
 }
@@ -1133,10 +1234,11 @@ if $UPDATE_SYSTEM; then
     for f in /etc/apt/sources.list.d/*.sources; do
         [ -e "$f" ] && enrich_deb822_components "$f"
     done
-    
+    common_apt_sources_changed
+
     # Update package lists once, then upgrade
-    apt_update_once
-    apt-get upgrade "${APT_INSTALL_OPTS[@]}" >/dev/null 2>&1
+    common_apt_update "system update"
+    common_apt_get upgrade -y >/dev/null 2>&1
     
     log "System updated successfully"
 else
@@ -1199,12 +1301,14 @@ if $INSTALL_BASE_UTILS; then
         "tmux"                    # Terminal multiplexer (critical for WSL2!)
     )
 
+    # resolve_fetch_packages runs in a subshell: refresh the index here so the mark survives.
+    common_apt_update "base package selection" || true
     while IFS= read -r fetch_pkg; do
         [ -n "$fetch_pkg" ] && base_packages+=("$fetch_pkg")
     done < <(resolve_fetch_packages)
     
     progress "Installing ${#base_packages[@]} base packages..."
-    safe_install "${base_packages[@]}"
+    common_safe_install "${base_packages[@]}" || warn "Some base packages were not installed, continuing"
 
     # Create symlinks for Debian naming conventions
     if command -v batcat >/dev/null 2>&1 && ! command -v bat >/dev/null 2>&1; then
@@ -1381,7 +1485,7 @@ if $CONFIGURE_LOCALES; then
     log "Configuring system locales..."
     
     # Install locales package with availability check
-    safe_install locales
+    common_safe_install locales || warn "locales package was not installed, locale generation may fail"
     
     # Check if dialog is available, fallback to read if not
 check_dialog() {
@@ -1443,7 +1547,7 @@ if $INSTALL_FISH; then
     log "Installing Fish shell and Starship prompt..."
 
     # Install Fish with availability check
-    safe_install fish curl
+    common_safe_install fish curl || warn "Fish shell prerequisites were not fully installed"
 
     # Install Starship
     if ! command -v starship >/dev/null 2>&1; then
@@ -1655,7 +1759,7 @@ section "${SYMBOL_GEAR} Bash Modernization"
 log "Configuring modern Bash setup..."
 
 # Ensure bash-completion is installed
-safe_install bash-completion
+common_safe_install bash-completion || warn "bash-completion was not installed"
 
 # Function to setup modern Bash for a user
 setup_bash_for_user() {
@@ -2120,7 +2224,7 @@ ensure_fnm_install_dependencies() {
     fi
 
     warn "Missing fnm prerequisites: ${missing_packages[*]}. Attempting to install them..."
-    safe_install "${missing_packages[@]}"
+    common_safe_install "${missing_packages[@]}" || true
 
     for pkg in "${missing_packages[@]}"; do
         command -v "$pkg" >/dev/null 2>&1 || unresolved_packages+=("$pkg")
@@ -2245,7 +2349,7 @@ if $CONFIGURE_SSH_AGENT; then
     log "Configuring SSH agent for WSL2..."
     
     # Install openssh-client with availability check
-    safe_install openssh-client
+    common_safe_install openssh-client || warn "openssh-client was not installed"
     
     if has_user_systemd; then
         log "Enabling ssh-agent.socket via systemd..."
@@ -2284,9 +2388,9 @@ if $INSTALL_DOCKER; then
     log "Installing Docker Engine from the official Docker APT repository..."
 
     # Remove old/conflicting Docker packages per official docs
-    apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true
+    common_apt_get remove -y docker.io docker-doc docker-compose podman-docker containerd runc 2>/dev/null || true
 
-    safe_install ca-certificates curl gnupg
+    common_safe_install ca-certificates curl gnupg || warn "Docker repository prerequisites were not fully installed"
 
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
@@ -2295,8 +2399,8 @@ if $INSTALL_DOCKER; then
 
     common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "/etc/apt/keyrings/docker.asc" > /etc/apt/sources.list.d/docker.sources
 
-    APT_UPDATED=0
-    apt_update_once
+    common_apt_sources_changed
+    common_apt_update "Docker repository refresh"
 
     docker_packages=(
         "docker-ce"
@@ -2305,7 +2409,7 @@ if $INSTALL_DOCKER; then
         "docker-buildx-plugin"
         "docker-compose-plugin"
     )
-    safe_install "${docker_packages[@]}"
+    common_safe_install "${docker_packages[@]}" || warn "Some Docker packages were not installed"
 
     if ! command -v docker >/dev/null 2>&1; then
         error "Docker installation failed - docker binary not found"
@@ -2398,9 +2502,9 @@ if $INSTALL_NVIDIA; then
     echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/${ARCH}/ /" | \
         tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
-    APT_UPDATED=0
-    if apt_update_once; then
-        safe_install nvidia-container-toolkit
+    common_apt_sources_changed
+    if common_apt_update "NVIDIA Container Toolkit repository refresh"; then
+        common_safe_install nvidia-container-toolkit || warn "NVIDIA Container Toolkit was not installed"
     else
         warn "Failed to refresh APT after adding the NVIDIA Container Toolkit repository"
         warn "Skipping NVIDIA Container Toolkit package installation until APT is healthy"
@@ -2512,6 +2616,7 @@ if $INSTALL_NVIDIA; then
                     [ -e "$f" ] && sed -i -E '/^\s*Components:\s*/ { /contrib/! s/$/ contrib/ }' "$f"
                 done
             fi
+            common_apt_sources_changed
             log "✓ contrib repository enabled"
         else
             log "✓ contrib repository already enabled"
@@ -2574,8 +2679,8 @@ if $INSTALL_NVIDIA; then
                 rm -f "$CUDA_KEYRING_PATH"
 
                 log "Updating APT repository cache..."
-                APT_UPDATED=0
-                if apt_update_once; then
+                common_apt_sources_changed
+                if common_apt_update "CUDA repository refresh"; then
                     log "✓ APT cache updated successfully"
                 else
                     warn "Failed to update package list after adding CUDA repository"
@@ -2604,7 +2709,7 @@ if $INSTALL_NVIDIA; then
             # metapackage can pull Linux driver packages that are not wanted in WSL.
             if CUDA_TOOLKIT_PACKAGE=$(resolve_cuda_toolkit_package); then
                 log "Found CUDA toolkit metapackage: $CUDA_TOOLKIT_PACKAGE"
-                if safe_install "$CUDA_TOOLKIT_PACKAGE"; then
+                if common_safe_install "$CUDA_TOOLKIT_PACKAGE"; then
                     log "CUDA toolkit package installed: $CUDA_TOOLKIT_PACKAGE"
                 else
                     warn "CUDA toolkit installation failed: $CUDA_TOOLKIT_PACKAGE"
@@ -2885,7 +2990,7 @@ if $ENABLE_AUTO_UPDATES; then
     log "Configuring automatic security updates..."
     
     # Install unattended-upgrades with availability check
-    safe_install unattended-upgrades apt-listchanges
+    common_safe_install unattended-upgrades apt-listchanges || warn "Automatic update packages were not installed"
     
     common_render_debian_unattended_upgrades_conf > /etc/apt/apt.conf.d/50unattended-upgrades
     common_render_apt_periodic_auto_upgrades_conf > /etc/apt/apt.conf.d/20auto-upgrades
@@ -2968,7 +3073,7 @@ echo "Starting WSL2 cleanup..."
 # Clean package cache
 apt-get clean
 apt-get autoclean
-apt-get autoremove -y
+apt-get -o DPkg::Lock::Timeout=300 autoremove -y
 
 # Clean journal logs
 journalctl --vacuum-time=7d
@@ -3084,7 +3189,7 @@ progress "Performing final cleanup..."
 # Clean package cache silently
 apt-get clean >/dev/null 2>&1
 apt-get autoclean >/dev/null 2>&1
-apt-get autoremove -y >/dev/null 2>&1
+common_apt_get autoremove -y >/dev/null 2>&1
 
 # Clear journal logs silently
 journalctl --vacuum-time=3d >/dev/null 2>&1

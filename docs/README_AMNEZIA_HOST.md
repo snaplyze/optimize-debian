@@ -162,7 +162,8 @@ sudo ./optimize_amnezia_host.sh --firewall-phase locked --yes
 --skip-swap               не создавать swapfile автоматически
 --skip-docker             не ставить Docker CE
 --skip-fish               не ставить Fish shell и Starship prompt
---kernel-backports        установить официальное LTS ядро из Debian Backports (Debian 12)
+--kernel-backports        установить официальное LTS ядро из Debian Backports (Debian 12);
+                          если оно не установилось из Backports, скрипт останавливается
 --firewall-phase <phase>  bootstrap | locked
 --yes                     не задавать интерактивный вопрос
 --help                    показать help
