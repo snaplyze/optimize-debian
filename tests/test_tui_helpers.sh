@@ -3,6 +3,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Every variable lib/tui.sh reads: the caller's environment must not change the result.
+unset TUI_BACKEND GUM TUI_GUM_BIN TUI_GUM_VERSION TUI_AUTO_INSTALL_GUM \
+    TUI_PROMPT_PREFIX TUI_RESOLVED_BACKEND OPTIMIZE_SOURCE_ONLY
+
 # shellcheck source=../lib/tui.sh
 source "$ROOT_DIR/lib/tui.sh"
 

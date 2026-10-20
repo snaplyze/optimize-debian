@@ -25,8 +25,14 @@ test_no_crlf_in_shell_or_docs() {
 }
 
 test_shell_scripts_parse() {
+    local file
+
     cd "$ROOT_DIR"
-    bash -n optimize_wsl2.sh optimize_vps.sh optimize_mini_pc.sh optimize_amnezia_host.sh upgrade-to-debian13.sh lib/*.sh tests/*.sh
+    # `bash -n a.sh b.sh` checks only a.sh (the rest become its arguments), so check each file.
+    for file in *.sh lib/*.sh tests/*.sh; do
+        [ -f "$file" ] || fail "no shell scripts matched: $file"
+        bash -n "$file" || fail "syntax error in $file"
+    done
 }
 
 test_optimizer_scripts_source_without_lib_directory() {
