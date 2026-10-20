@@ -105,6 +105,7 @@ test_existing_user_requires_authorized_keys_before_hardening() {
         source "$SCRIPT_ROOT/optimize_amnezia_host.sh"
 
         tmp_home=$(mktemp -d)
+        trap "rm -rf \"$tmp_home\"" EXIT
         TARGET_USER=sample
 
         user_home_for() {
