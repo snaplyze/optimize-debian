@@ -563,6 +563,23 @@ package_available() {
     ! LC_ALL=C apt-cache policy "$1" 2>/dev/null | grep -q "Candidate: (none)"
 }
 
+run_apt_update_with_diagnostics() {
+    local context="$1"
+    local output
+    local status
+
+    output=$(apt-get update 2>&1) && status=0 || status=$?
+    log_silent "$output"
+
+    if [ $status -ne 0 ]; then
+        error "apt-get update failed during: $context"
+        printf '%s\n' "$output" | head -10 | sed 's/^/    /'
+        return $status
+    fi
+
+    return 0
+}
+
 # Safe package installation with availability check (silent mode)
 safe_install() {
     local packages=("$@")

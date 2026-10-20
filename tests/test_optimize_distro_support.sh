@@ -365,28 +365,39 @@ test_vps_ntp_and_apt_helpers() {
     '
 }
 
-test_vps_apt_update_failure_diagnostics() {
-    SCRIPT_ROOT="$ROOT_DIR" bash -c '
-        set -euo pipefail
-        OPTIMIZE_SOURCE_ONLY=1
-        source "$SCRIPT_ROOT/optimize_vps.sh"
-        test_tmp="$(mktemp -d)"
-        trap "rm -rf \"$test_tmp\"" EXIT
-        log_silent() { :; }
-        error() { printf "ERROR: %s\n" "$1"; }
-        apt-get() {
-            printf "%s\n" "E: synthetic apt failure"
-            return 1
-        }
+test_apt_update_diagnostics() {
+    local script
+    # Users run the scripts as `bash <(curl ...)`, without lib/: check the copy alone.
+    for script in optimize_vps.sh optimize_mini_pc.sh; do
+        SCRIPT_ROOT="$ROOT_DIR" SCRIPT_NAME="$script" bash -c '
+            set -euo pipefail
+            test_tmp="$(mktemp -d)"
+            trap "rm -rf \"$test_tmp\"" EXIT
+            cp "$SCRIPT_ROOT/$SCRIPT_NAME" "$test_tmp/$SCRIPT_NAME"
+            OPTIMIZE_SOURCE_ONLY=1
+            source "$test_tmp/$SCRIPT_NAME"
+            declare -F run_apt_update_with_diagnostics >/dev/null || {
+                printf "FAIL: %s must define run_apt_update_with_diagnostics\n" "$SCRIPT_NAME" >&2
+                exit 1
+            }
+            log_silent() { :; }
+            error() { printf "ERROR: %s\n" "$1"; }
 
-        if run_apt_update_with_diagnostics "test refresh" > "$test_tmp/apt-diag.txt" 2>&1; then
-            printf "FAIL: expected apt update helper to fail\n" >&2
-            exit 1
-        fi
+            apt-get() { return 0; }
+            run_apt_update_with_diagnostics "test refresh" > "$test_tmp/apt-ok.txt" 2>&1
 
-        grep -q "apt-get update failed during: test refresh" "$test_tmp/apt-diag.txt"
-        grep -q "synthetic apt failure" "$test_tmp/apt-diag.txt"
-    '
+            apt-get() {
+                printf "%s\n" "E: synthetic apt failure"
+                return 1
+            }
+            if run_apt_update_with_diagnostics "test refresh" > "$test_tmp/apt-diag.txt" 2>&1; then
+                printf "FAIL: %s: expected apt update helper to fail\n" "$SCRIPT_NAME" >&2
+                exit 1
+            fi
+            grep -q "apt-get update failed during: test refresh" "$test_tmp/apt-diag.txt"
+            grep -q "synthetic apt failure" "$test_tmp/apt-diag.txt"
+        '
+    done
 }
 
 test_vps_enrichment_rewrite_failure_is_diagnostic() {
@@ -445,7 +456,7 @@ main() {
     test_repository_text_contracts
     test_vps_safe_install_reports_install_failures
     test_vps_ntp_and_apt_helpers
-    test_vps_apt_update_failure_diagnostics
+    test_apt_update_diagnostics
     test_vps_enrichment_rewrite_failure_is_diagnostic
     test_mini_ntp_helper
     printf 'tests/test_optimize_distro_support.sh: OK\n'
