@@ -92,6 +92,8 @@ test_disk_space_checks_separate_mountpoints() {
     SCRIPT_ROOT="$ROOT_DIR" bash -c '
         set -euo pipefail
         source "$SCRIPT_ROOT/upgrade-to-debian13.sh"
+        test_tmp="$(mktemp -d)"
+        trap "rm -rf \"$test_tmp\"" EXIT
         log() { :; }
         die() { printf "DIE: %s\n" "$1"; exit "${2:-1}"; }
         findmnt() {
@@ -108,7 +110,7 @@ test_disk_space_checks_separate_mountpoints() {
                 /usr) printf "Avail\n6291456\n" ;;
             esac
         }
-        if ( check_disk_space >/tmp/upgrade-disk-low.txt 2>&1 ); then
+        if ( check_disk_space >"$test_tmp/disk-low.txt" 2>&1 ); then
             printf "FAIL: low free space on a separate /boot mount must fail preflight\n" >&2
             exit 1
         fi
@@ -118,6 +120,7 @@ test_disk_space_checks_separate_mountpoints() {
         set -euo pipefail
         source "$SCRIPT_ROOT/upgrade-to-debian13.sh"
         checked_file=$(mktemp)
+        trap "rm -f \"$checked_file\"" EXIT
         log() { :; }
         die() { printf "DIE: %s\n" "$1"; exit "${2:-1}"; }
         findmnt() {

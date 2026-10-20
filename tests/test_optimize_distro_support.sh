@@ -318,6 +318,8 @@ test_vps_ntp_and_apt_helpers() {
         set -euo pipefail
         OPTIMIZE_SOURCE_ONLY=1
         source "$SCRIPT_ROOT/optimize_vps.sh"
+        test_tmp="$(mktemp -d)"
+        trap "rm -rf \"$test_tmp\"" EXIT
         log() { :; }
         warn() { :; }
         info() { :; }
@@ -329,14 +331,14 @@ test_vps_ntp_and_apt_helpers() {
         systemd_system_available() { return 0; }
         service_unit_exists() { return 1; }
         package_available() { [ "$1" = "systemd-timesyncd" ]; }
-        safe_install() { printf "%s\n" "$*" > /tmp/ntp-install-vps.txt; }
+        safe_install() { printf "%s\n" "$*" > "$test_tmp/ntp-install.txt"; }
         service_unit_active() { return 1; }
         service_unit_enable_now() { return 0; }
         service_unit_start() { return 0; }
         TIME_SYNC_SERVICE_NAME="Not configured"
         ensure_time_sync_service
         [[ "$TIME_SYNC_SERVICE_NAME" == "systemd-timesyncd" ]]
-        [[ "$(cat /tmp/ntp-install-vps.txt)" == "systemd-timesyncd" ]]
+        [[ "$(cat "$test_tmp/ntp-install.txt")" == "systemd-timesyncd" ]]
 
         timedatectl_available() { return 0; }
         ensure_time_sync_service() { TIME_SYNC_SERVICE_NAME="chronyd"; return 0; }
@@ -368,6 +370,8 @@ test_vps_apt_update_failure_diagnostics() {
         set -euo pipefail
         OPTIMIZE_SOURCE_ONLY=1
         source "$SCRIPT_ROOT/optimize_vps.sh"
+        test_tmp="$(mktemp -d)"
+        trap "rm -rf \"$test_tmp\"" EXIT
         log_silent() { :; }
         error() { printf "ERROR: %s\n" "$1"; }
         apt-get() {
@@ -375,13 +379,13 @@ test_vps_apt_update_failure_diagnostics() {
             return 1
         }
 
-        if run_apt_update_with_diagnostics "test refresh" > /tmp/apt-diag.txt 2>&1; then
+        if run_apt_update_with_diagnostics "test refresh" > "$test_tmp/apt-diag.txt" 2>&1; then
             printf "FAIL: expected apt update helper to fail\n" >&2
             exit 1
         fi
 
-        grep -q "apt-get update failed during: test refresh" /tmp/apt-diag.txt
-        grep -q "synthetic apt failure" /tmp/apt-diag.txt
+        grep -q "apt-get update failed during: test refresh" "$test_tmp/apt-diag.txt"
+        grep -q "synthetic apt failure" "$test_tmp/apt-diag.txt"
     '
 }
 
@@ -390,21 +394,21 @@ test_vps_enrichment_rewrite_failure_is_diagnostic() {
         set -euo pipefail
         OPTIMIZE_SOURCE_ONLY=1
         source "$SCRIPT_ROOT/optimize_vps.sh"
+        test_tmp="$(mktemp -d)"
+        trap "rm -rf \"$test_tmp\"" EXIT
         progress() { :; }
         error() { printf "ERROR: %s\n" "$1"; }
         mktemp() { return 1; }
 
-        tmp_file=$(mktemp /tmp/vps-source-test.XXXXXX 2>/dev/null || true)
-        tmp_file=${tmp_file:-/tmp/vps-source-test.$$}
+        tmp_file="$test_tmp/vps-source-test"
         printf "%s\n" "deb http://mirror.example/debian bookworm main" > "$tmp_file"
 
-        if enrich_apt_components "$tmp_file" > /tmp/enrich-diag.txt 2>&1; then
+        if enrich_apt_components "$tmp_file" > "$test_tmp/enrich-diag.txt" 2>&1; then
             printf "FAIL: expected enrich_apt_components to fail when mktemp fails\n" >&2
             exit 1
         fi
 
-        grep -q "Failed to allocate temporary file while updating" /tmp/enrich-diag.txt
-        rm -f "$tmp_file" /tmp/enrich-diag.txt
+        grep -q "Failed to allocate temporary file while updating" "$test_tmp/enrich-diag.txt"
     '
 }
 
