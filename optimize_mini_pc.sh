@@ -3332,6 +3332,11 @@ if $INSTALL_SAMBA; then
         if ! grep -q "server min protocol" "$SAMBA_CONF"; then
             sed -i '/\[global\]/a \   server min protocol = SMB2' "$SAMBA_CONF"
         fi
+        # NTLMv2 only (NTLMv1 and LANMAN off): the Samba default, written out so it does not
+        # depend on the default; an operator's own value stays.
+        if ! grep -Eq '^[[:space:]]*ntlm auth[[:space:]]*=' "$SAMBA_CONF"; then
+            sed -i '/\[global\]/a \   ntlm auth = ntlmv2-only' "$SAMBA_CONF"
+        fi
 
         # Disable the default [homes] share (only that section, other sections keep their lines)
         disable_samba_homes_section "$SAMBA_CONF"

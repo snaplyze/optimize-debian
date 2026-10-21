@@ -242,8 +242,9 @@ test_forbidden_patterns_hygiene() {
         if grep -Eq 'rp_filter = 1' "$ROOT_DIR/$script"; then
             fail "$script must not configure Strict rp_filter (1)"
         fi
-        if grep -Eq 'ntlm[[:space:]]+auth' "$ROOT_DIR/$script"; then
-            fail "$script must not re-enable obsolete and insecure ntlm auth"
+        # ntlmv1-permitted (alias yes) re-enables NTLMv1; ntlmv2-only is the safe Samba default.
+        if grep -Eiq 'ntlm[[:space:]]+auth[[:space:]]*=[[:space:]]*(yes|true|1|ntlmv1-permitted)' "$ROOT_DIR/$script"; then
+            fail "$script must not re-enable obsolete and insecure NTLMv1 (ntlm auth)"
         fi
         if grep -Eq 'logpath = /var/log/auth.log' "$ROOT_DIR/$script"; then
             fail "$script fail2ban must not require /var/log/auth.log on systemd-journal Debian"
@@ -252,6 +253,9 @@ test_forbidden_patterns_hygiene() {
             fail "$script should no longer contain NVM references"
         fi
     done
+    # The Samba block of the mini-PC runs inline in optimize_main; the guide promises NTLMv2 only.
+    grep -Fq "ntlm auth = ntlmv2-only" "$ROOT_DIR/optimize_mini_pc.sh" || \
+        fail "optimize_mini_pc.sh must set ntlm auth = ntlmv2-only for Samba"
 
     if grep -Eq 'safe_install[[:space:]]+cuda([[:space:]]|$)' "$ROOT_DIR/optimize_wsl2.sh"; then
         fail 'optimize_wsl2.sh must not install the broad cuda metapackage in WSL'

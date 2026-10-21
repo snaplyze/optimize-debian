@@ -13,7 +13,7 @@ export LANG=C
 
 set -Eeuo pipefail
 
-SCRIPT_VERSION="4.0"
+SCRIPT_VERSION="4.1.0"
 export DEBIAN_FRONTEND=noninteractive
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_PATH="$(readlink -f "$SCRIPT_SOURCE" 2>/dev/null || printf '%s' "$SCRIPT_SOURCE")"

@@ -24,7 +24,7 @@
 ### ⚡ 10 Gbps Networking & VPN Tuning
 - **BBR & fq** - алгоритм контроля перегрузок BBR с планировщиком `fq`
 - **Адаптивные буферы** - до 64MB TCP/UDP буферы (`rmem_max=67108864`) для максимального BDP на 10G каналах
-- **Сетевые очереди** - `netdev_max_backlog = 32768`, `somaxconn = 16384`
+- **Сетевые очереди** - `netdev_max_backlog = 32768`, `somaxconn = 32768`
 - **Persistent Modules** - автозагрузка `tcp_bbr`, `tun`, `wireguard` через `/etc/modules-load.d/`
 - **VPN Routing** - UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"` и IP forwarding
 
@@ -328,7 +328,7 @@ net.netfilter.nf_conntrack_max = 262144
 net.netfilter.nf_conntrack_tcp_timeout_established = 1800
 
 # NAT Performance
-net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.ip_local_port_range = 10240 65535
 net.ipv4.tcp_tw_reuse = 1
 
 # BBR congestion control
@@ -339,18 +339,18 @@ net.core.default_qdisc = fq
 ### Сетевые настройки (оптимизировано под каналы до 10 Гбит/с)
 ```bash
 # TCP/UDP Buffer Sizes (адаптивно до 64MB для 10G BDP)
-net.core.rmem_default = 2097152
+net.core.rmem_default = 2097152  # 2MB (1MB на VPS с <3GB RAM)
 net.core.wmem_default = 2097152
 net.core.rmem_max = 67108864   # 64MB (или 32MB на VPS с <3GB RAM)
 net.core.wmem_max = 67108864
-net.ipv4.tcp_rmem = 4096 1048576 67108864
+net.ipv4.tcp_rmem = 4096 1048576 67108864  # максимум = rmem_max
 net.ipv4.tcp_wmem = 4096 1048576 67108864
 net.ipv4.udp_rmem_min = 16384
 net.ipv4.udp_wmem_min = 16384
 
 # Сетевые очереди для высокого throughput
 net.core.netdev_max_backlog = 32768
-net.core.somaxconn = 16384
+net.core.somaxconn = 32768
 net.ipv4.tcp_max_syn_backlog = 16384
 ```
 
@@ -361,10 +361,10 @@ fs.file-max = 2097152
 fs.inotify.max_user_watches = 524288
 
 # Оптимизация памяти
-vm.swappiness = 10
-vm.vfs_cache_pressure = 50
-vm.dirty_ratio = 15
-vm.dirty_background_ratio = 5
+vm.swappiness = 10            # 60 на VPS с <3GB RAM
+vm.vfs_cache_pressure = 60
+vm.dirty_ratio = 20
+vm.dirty_background_ratio = 10
 ```
 
 ### I/O планировщики (расширенная оптимизация)

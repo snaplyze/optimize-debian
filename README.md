@@ -461,7 +461,7 @@ MIT License - свободное использование и модифика�
 ### VPS v3.0.0 (Текущая) - 2026-09-04
 - 🚀 **Debian Backports kernel:** замена XanMod на официальный репозиторий `bookworm-backports` (LTS ядро, полная поддержка amd64 и arm64)
 - 🐟 **Fish + Starship:** интерактивный современный shell со Starship (`nerd-font-symbols`), гибридный запуск через `~/.bashrc` (сохраняет `/bin/bash` в `/etc/passwd`)
-- ⚡ **10 Gbps сетевой стек:** адаптивные BDP буферы (rmem/wmem до 64MB), очереди `netdev_max_backlog=32768`, `somaxconn=16384`, conntrack до 262k
+- ⚡ **10 Gbps сетевой стек:** адаптивные BDP буферы (rmem/wmem до 64MB), очереди `netdev_max_backlog=32768`, `somaxconn=32768`, conntrack до 262k
 - 🛡️ **Безопасность:** Fail2Ban с `python3-systemd`, UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"`
 - 🔌 **Persistent Modules:** гарантированная загрузка `tcp_bbr`, `tun`, `wireguard` через `/etc/modules-load.d/`
 - 🔒 **Security Audit 2026:** атомарная валидация sudoers (`visudo -cf`), безопасный `getent passwd`, устранение `noexec` с `/tmp` tmpfs, Loose `rp_filter = 2`, современный `KbdInteractiveAuthentication no`, очистка скачанных архивов Go

@@ -294,8 +294,8 @@ echo always > /sys/kernel/mm/transparent_hugepage/defrag
 
 # Memory Management (для больших моделей и датасетов)
 vm.swappiness = 1                    # Минимальное использование swap
-vm.vfs_cache_pressure = 50
-vm.dirty_ratio = 40                  # Агрессивное кэширование
+vm.vfs_cache_pressure = 40
+vm.dirty_ratio = 30                  # Больше грязных страниц в кэше
 vm.dirty_background_ratio = 10
 vm.max_map_count = 262144            # Для больших memory-mapped файлов
 
@@ -309,26 +309,23 @@ kernel.shmall = 16777216             # 64GB в страницах
 # TCP/UDP Buffer Sizes (агрессивно для 32GB RAM)
 net.core.rmem_max = 67108864         # 64MB
 net.core.wmem_max = 67108864
-net.ipv4.tcp_rmem = 4096 87380 67108864
-net.ipv4.tcp_wmem = 4096 65536 67108864
+net.ipv4.tcp_rmem = 4096 524288 67108864
+net.ipv4.tcp_wmem = 4096 524288 67108864
 
 # BBR congestion control
 net.ipv4.tcp_congestion_control = bbr
 net.core.default_qdisc = fq
 
 # Network Performance
-net.core.netdev_max_backlog = 16384
-net.core.somaxconn = 8192
+net.core.netdev_max_backlog = 32768
+net.core.somaxconn = 16384
 ```
 
 ### Файловая система
 ```bash
 # Увеличенные лимиты файлов (для больших проектов)
-fs.file-max = 2097152
-fs.inotify.max_user_watches = 524288
-
-# AIO (Asynchronous I/O для ML/AI frameworks)
-fs.aio-max-nr = 1048576
+fs.file-max = 4194304
+fs.inotify.max_user_watches = 2097152
 ```
 
 ### I/O планировщики (агрессивная оптимизация для NVMe)
@@ -341,7 +338,7 @@ ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/read_ahead_kb}="1024
 # SSD drives - optimization
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/nr_requests}="1024"
-ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="512"
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="1024"
 ```
 
 ### System Limits (для GPU и ML/AI)
