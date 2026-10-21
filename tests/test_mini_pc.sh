@@ -104,10 +104,38 @@ test_ssh_public_key_validation_with_real_ssh_keygen() {
 
 # Common mocks for apply_ssh_hardening: events for sshd and systemctl.
 SSH_MOCKS='
-    SSHD_HARDENING_FILE="$T/sshd_config.d/99-hardening.conf"
+    SSHD_HARDENING_FILE="$T/sshd_config.d/00-optimize-hardening.conf"
+    SSHD_LEGACY_HARDENING_FILE="$T/sshd_config.d/99-hardening.conf"
     SSHD_T_RC=0
+    SSHD_DUMP_RC=0
     RESTART_RC=0
-    sshd() { event "sshd $*"; return "$SSHD_T_RC"; }
+    # sshd -T: the drop-ins in name order; the first value of a keyword wins, while
+    # allowusers and port add up, as in sshd. Only keywords set in the files are printed.
+    sshd_effective() {
+        local file key value
+        local -A seen=()
+        for file in "$T"/sshd_config.d/*.conf; do
+            [ -f "$file" ] || continue
+            while read -r key value; do
+                case "$key" in "" | "#"*) continue ;; esac
+                key="${key,,}"
+                case "$key" in
+                    allowusers | port) ;;
+                    *) [ -z "${seen[$key]:-}" ] || continue; seen[$key]=1 ;;
+                esac
+                printf "%s %s\n" "$key" "$value"
+            done < "$file"
+        done
+    }
+    sshd() {
+        event "sshd $*"
+        if [ "$1" = -T ]; then
+            [ "$SSHD_DUMP_RC" -eq 0 ] || return "$SSHD_DUMP_RC"
+            sshd_effective
+            return 0
+        fi
+        return "$SSHD_T_RC"
+    }
     systemctl() { event "systemctl $*"; return "$RESTART_RC"; }
 '
 
@@ -141,6 +169,76 @@ test_ssh_hardening_sshd_t_failure_removes_dropin_and_skips_restart() {
         assert_rc 1 "failed sshd -t must fail the hardening"
         [ "$(cat "$SSHD_HARDENING_FILE")" = "Port 2222" ] || die "previous drop-in must be restored"
         assert_no_event_matches "^systemctl"
+    '
+}
+
+test_ssh_hardening_paths() {
+    # Debian reads the drop-ins in name order and sshd keeps the first value: ours sorts first.
+    run_case '
+        [ "$SSHD_HARDENING_FILE" = /etc/ssh/sshd_config.d/00-optimize-hardening.conf ] || die "the hardening drop-in must sort before the other drop-ins"
+        [ "$SSHD_LEGACY_HARDENING_FILE" = /etc/ssh/sshd_config.d/99-hardening.conf ] || die "the drop-in of earlier versions moved"
+    '
+}
+
+test_ssh_hardening_effective_values() {
+    # A drop-in read after ours, such as 50-cloud-init.conf, does not override it.
+    run_case "$SSH_MOCKS"'
+        mkdir -p "$T/sshd_config.d"
+        printf "PasswordAuthentication yes\n" > "$T/sshd_config.d/50-cloud-init.conf"
+        apply_ssh_hardening alice
+        grep -Fxq "KbdInteractiveAuthentication no" "$SSHD_HARDENING_FILE" || die "drop-in lacks KbdInteractiveAuthentication no"
+        assert_event "sshd -T"
+        assert_event "systemctl restart ssh.service"
+    '
+    # A drop-in read first wins: the hardening fails, ours goes, SSH is not restarted.
+    run_case "$SSH_MOCKS"'
+        mkdir -p "$T/sshd_config.d"
+        printf "PasswordAuthentication yes\n" > "$T/sshd_config.d/00-aaa.conf"
+        run_status apply_ssh_hardening alice
+        assert_rc 1 "an overridden hardening value must fail the hardening"
+        assert_out "passwordauthentication: expected no, effective yes" "the overridden value must be named"
+        [ ! -e "$SSHD_HARDENING_FILE" ] || die "the overridden drop-in must be removed"
+        assert_no_event_matches "^systemctl"
+    '
+    # sshd -T fails: the values cannot be confirmed, so the same.
+    run_case "$SSH_MOCKS"'
+        SSHD_DUMP_RC=255
+        run_status apply_ssh_hardening alice
+        assert_rc 1 "a failed sshd -T must fail the hardening"
+        assert_out "sshd -T failed" "the failed read-back must be named"
+        [ ! -e "$SSHD_HARDENING_FILE" ] || die "an unconfirmed drop-in must be removed"
+        assert_no_event_matches "^systemctl"
+    '
+}
+
+test_ssh_hardening_replaces_the_legacy_dropin() {
+    # The four lines an earlier version wrote go: their AllowUsers would add to ours.
+    run_case "$SSH_MOCKS"'
+        mkdir -p "$T/sshd_config.d"
+        printf "PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers old\n" > "$SSHD_LEGACY_HARDENING_FILE"
+        run_status apply_ssh_hardening alice
+        assert_rc 0 "hardening over an earlier version"
+        [ ! -e "$SSHD_LEGACY_HARDENING_FILE" ] || die "the earlier drop-in must be removed"
+        assert_out "Removed the drop-in of an earlier version" "the removal must be reported"
+        [ "$(sshd_effective | grep "^allowusers")" = "allowusers alice" ] || die "only the new AllowUsers may stay"
+    '
+    # A failed restart puts the earlier drop-in back.
+    run_case "$SSH_MOCKS"'
+        mkdir -p "$T/sshd_config.d"
+        printf "PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers old\n" > "$SSHD_LEGACY_HARDENING_FILE"
+        RESTART_RC=1
+        run_status apply_ssh_hardening alice
+        assert_rc 1 "failed restart must fail the hardening"
+        [ "$(cat "$SSHD_LEGACY_HARDENING_FILE")" = "$(printf "PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers old")" ] || \
+            die "the earlier drop-in must be restored"
+        [ ! -e "$SSHD_HARDENING_FILE" ] || die "the new drop-in must be removed"
+    '
+    # The same name with other content is an operator file and stays.
+    run_case "$SSH_MOCKS"'
+        mkdir -p "$T/sshd_config.d"
+        printf "PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers old\nPort 2222\n" > "$SSHD_LEGACY_HARDENING_FILE"
+        apply_ssh_hardening alice
+        grep -Fxq "Port 2222" "$SSHD_LEGACY_HARDENING_FILE" || die "an operator file must stay"
     '
 }
 
@@ -496,7 +594,10 @@ main() {
     test_ssh_hardening_write_errors_keep_the_previous_dropin
     test_ssh_hardening_applies_after_sshd_t
     test_ssh_hardening_sshd_t_failure_removes_dropin_and_skips_restart
+    test_ssh_hardening_effective_values
+    test_ssh_hardening_replaces_the_legacy_dropin
     test_ssh_hardening_restart_failure_is_reported_and_reverted
+    test_ssh_hardening_paths
     test_ipv4_network_cidr_and_lan_detection
     test_samba_firewall_rule_is_limited_to_the_lan
     test_samba_firewall_without_subnet

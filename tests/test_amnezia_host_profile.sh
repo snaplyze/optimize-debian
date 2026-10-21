@@ -603,12 +603,34 @@ test_firewall_locked_phase() {
 SSH_CASE_SETUP='
     TARGET_USER=ops
     SSH_PORT=2222
-    SSH_HARDENING_DROPIN="$T/sshd_config.d/99-test.conf"
+    SSH_HARDENING_DROPIN="$T/sshd_config.d/00-test.conf"
+    SSH_LEGACY_HARDENING_DROPIN="$T/sshd_config.d/99-amnezia-host-hardening.conf"
 
+    # sshd -T: the drop-ins in name order; the first value of a keyword wins, while allowusers
+    # and port add up, as in sshd. Without a Port line the port is CURRENT_SSH_PORT.
+    sshd_effective() {
+        local file key value port_set=""
+        local -A seen=()
+        for file in "$T"/sshd_config.d/*.conf; do
+            [ -f "$file" ] || continue
+            while read -r key value; do
+                case "$key" in "" | "#"*) continue ;; esac
+                key="${key,,}"
+                case "$key" in
+                    port) port_set=1 ;;
+                    allowusers) ;;
+                    *) [ -z "${seen[$key]:-}" ] || continue; seen[$key]=1 ;;
+                esac
+                printf "%s %s\n" "$key" "$value"
+            done < "$file"
+        done
+        [ -n "$port_set" ] || printf "port %s\n" "${CURRENT_SSH_PORT:-22}"
+    }
     sshd() {
         event "sshd $*"
         if [ "${1:-}" = -T ]; then
-            printf "port %s\n" "${CURRENT_SSH_PORT:-22}"
+            [ ! -e "$T/sshd_dump_fails" ] || return 255
+            sshd_effective
             return 0
         fi
         [ ! -e "$T/sshd_test_fails" ]
@@ -637,7 +659,7 @@ SSH_CASE_SETUP='
         fi
     }
     reset_ssh_case() {
-        rm -rf "$T"/sshd_config.d "$T"/sshd_test_fails "$T"/no_systemd "$T"/ssh_unit_fails \
+        rm -rf "$T"/sshd_config.d "$T"/sshd_test_fails "$T"/sshd_dump_fails "$T"/no_systemd "$T"/ssh_unit_fails \
             "$T"/sshd_unit_fails "$T"/ufw_active "$T"/ufw_allow_fails "$T"/units_fail_on_new_port \
             "$T"/ufw_has_ssh_rule
         SSH_PORT_RULE_ADDED=false
@@ -812,9 +834,90 @@ test_ssh_hardening_without_systemd() {
     '
 }
 
+test_ssh_hardening_effective_values() {
+    run_case "$SSH_CASE_SETUP"'
+        # A drop-in read after ours, such as 50-cloud-init.conf, does not override it.
+        reset_ssh_case
+        mkdir -p "$T/sshd_config.d"
+        printf "PasswordAuthentication yes\n" > "$T/sshd_config.d/50-cloud-init.conf"
+        run_status configure_ssh_hardening
+        assert_rc 0 "a later drop-in must not override the hardening"
+        assert_before "sshd -t" "systemctl restart ssh.service"
+        assert_event "sshd -T"
+
+        # A drop-in read first wins: the step stops before the firewall and the restart.
+        reset_ssh_case
+        : > "$T/ufw_active"
+        mkdir -p "$T/sshd_config.d"
+        printf "PasswordAuthentication yes\n" > "$T/sshd_config.d/00-aaa.conf"
+        run_status configure_ssh_hardening
+        assert_failed "an overridden hardening value must stop the step"
+        assert_out "passwordauthentication: expected no, effective yes" "the overridden value must be named"
+        [ ! -e "$SSH_HARDENING_DROPIN" ] || die "the overridden drop-in must be removed"
+        assert_no_event_matches "^ufw allow"
+        assert_no_event_matches "^systemctl"
+
+        # The port the drop-in sets must be among the ports sshd takes: Port adds up.
+        reset_ssh_case
+        mkdir -p "$T/sshd_config.d"
+        printf "Port 22\n" > "$T/sshd_config.d/00-aaa.conf"
+        run_status configure_ssh_hardening
+        assert_rc 0 "another Port line adds a port and keeps ours"
+
+        # sshd -T fails after the write: the values cannot be confirmed.
+        reset_ssh_case
+        write_previous_dropin
+        sshd() {
+            event "sshd $*"
+            if [ "${1:-}" = -T ] && grep -q "^AllowUsers" "$SSH_HARDENING_DROPIN"; then return 255; fi
+            [ "${1:-}" != -T ] || sshd_effective
+        }
+        run_status configure_ssh_hardening
+        assert_failed "a failed sshd -T must stop the step"
+        assert_out "sshd -T failed" "the failed read-back must be named"
+        [ "$(cat "$SSH_HARDENING_DROPIN")" = "# previous valid drop-in" ] || die "previous drop-in must be restored"
+        assert_no_event_matches "^systemctl"
+    '
+}
+
+test_ssh_hardening_replaces_the_legacy_dropin() {
+    run_case "$SSH_CASE_SETUP"'
+        # The drop-in of an earlier version goes: its AllowUsers would add to ours.
+        reset_ssh_case
+        mkdir -p "$T/sshd_config.d"
+        printf "# Minimal Amnezia host SSH baseline\nAllowUsers old\nPort 2222\n" > "$SSH_LEGACY_HARDENING_DROPIN"
+        run_status configure_ssh_hardening
+        assert_rc 0 "hardening over an earlier version"
+        [ ! -e "$SSH_LEGACY_HARDENING_DROPIN" ] || die "the earlier drop-in must be removed"
+        assert_out "Removed the drop-in of an earlier version" "the removal must be reported"
+        [ "$(sshd_effective | grep "^allowusers")" = "allowusers ops" ] || die "only the new AllowUsers may stay"
+
+        # A failed restart puts the earlier drop-in back.
+        reset_ssh_case
+        mkdir -p "$T/sshd_config.d"
+        printf "# Minimal Amnezia host SSH baseline\nAllowUsers old\n" > "$SSH_LEGACY_HARDENING_DROPIN"
+        : > "$T/ssh_unit_fails"
+        : > "$T/sshd_unit_fails"
+        run_status configure_ssh_hardening
+        assert_failed "a failed restart must stop the step"
+        [ "$(cat "$SSH_LEGACY_HARDENING_DROPIN")" = "$(printf "# Minimal Amnezia host SSH baseline\nAllowUsers old")" ] || \
+            die "the earlier drop-in must be restored"
+        [ ! -e "$SSH_HARDENING_DROPIN" ] || die "the new drop-in must be removed"
+
+        # Another file with that name is an operator file and stays.
+        reset_ssh_case
+        mkdir -p "$T/sshd_config.d"
+        printf "# operator settings\nAllowUsers backup\n" > "$SSH_LEGACY_HARDENING_DROPIN"
+        run_status configure_ssh_hardening
+        assert_rc 0 "hardening next to an operator file"
+        grep -Fxq "AllowUsers backup" "$SSH_LEGACY_HARDENING_DROPIN" || die "an operator file must stay"
+    '
+}
+
 test_product_paths_default_to_system_locations() {
     run_case '
-        [ "$SSH_HARDENING_DROPIN" = "/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf" ] || die "SSH hardening must use the dedicated drop-in"
+        [ "$SSH_HARDENING_DROPIN" = "/etc/ssh/sshd_config.d/00-amnezia-host-hardening.conf" ] || die "SSH hardening must use the dedicated drop-in, sorted first"
+        [ "$SSH_LEGACY_HARDENING_DROPIN" = "/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf" ] || die "the legacy drop-in path changed"
         [ "$UFW_DEFAULTS_FILE" = "/etc/default/ufw" ] || die "UFW defaults path changed"
         [ "$ADDUSER_BIN" = "/usr/sbin/adduser" ] || die "adduser path changed"
         [ "$SYSCTL_CONF_FILE" = "/etc/sysctl.d/99-amnezia-host.conf" ] || die "sysctl must use the dedicated file"
@@ -1171,6 +1274,8 @@ main() {
     test_ssh_hardening_failures_are_visible
     test_ssh_hardening_rolls_back_failed_restart
     test_ssh_hardening_without_systemd
+    test_ssh_hardening_effective_values
+    test_ssh_hardening_replaces_the_legacy_dropin
     test_product_paths_default_to_system_locations
     test_sysctl_baseline
     test_sysctl_buffers_follow_memory

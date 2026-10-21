@@ -636,9 +636,54 @@ if ! declare -F common_temp_dir >/dev/null; then
     }
 fi
 
+if ! declare -F common_sshd_effective_mismatches >/dev/null; then
+    # SSH hardening drop-ins. For most keywords sshd keeps the first value it reads, and Debian's
+    # sshd_config includes /etc/ssh/sshd_config.d/*.conf in name order before its own lines, so a
+    # drop-in that sorts first (for example cloud-init's 50-cloud-init.conf before 99-*.conf) wins.
+    # The hardening drop-ins are named 00-*.conf, and the values sshd takes are read back with sshd -T.
+
+    # common_sshd_effective_mismatches <"keyword value">...: prints "keyword: expected <value>,
+    # effective <values>" for each pair that `sshd -T` does not show. Keywords are lower case, as
+    # sshd -T prints them; a keyword that takes several values (allowusers, port) matches when one of
+    # them is the expected one. Match blocks are not applied. Returns 0 when every pair matches, 1 on
+    # a mismatch and 2 when sshd -T fails.
+    common_sshd_effective_mismatches() {
+        local effective pair keyword actual rc=0
+
+        effective="$(sshd -T 2>/dev/null)" || return 2
+        for pair in "$@"; do
+            grep -qxF -- "$pair" <<<"$effective" && continue
+            keyword="${pair%% *}"
+            actual="$(awk -v k="$keyword" '$1 == k { sub(/^[^ ]+ /, ""); v = v (v == "" ? "" : ", ") $0 } END { print v }' <<<"$effective")"
+            printf '%s: expected %s, effective %s\n' "$keyword" "${pair#* }" "${actual:-none}"
+            rc=1
+        done
+        return "$rc"
+    }
+
+    # common_sshd_legacy_dropin_is_ours <file>: <file> is a hardening drop-in that an earlier version
+    # of these scripts wrote under a 99-*.conf name: it starts with the VPS or Amnezia header, or it is
+    # exactly the four lines of the mini-PC. An operator's file with the same name is not ours.
+    common_sshd_legacy_dropin_is_ours() {
+        local file="${1:-}"
+        local lines=()
+
+        [ -f "$file" ] && mapfile -t lines < "$file" 2>/dev/null || return 1
+        case "${lines[0]:-}" in
+            "# SSH Hardening - VPS Optimization" | "# Minimal Amnezia host SSH baseline") return 0 ;;
+        esac
+        [ "${#lines[@]}" -eq 4 ] && [ "${lines[0]}" = "PermitRootLogin no" ] &&
+            [ "${lines[1]}" = "PasswordAuthentication no" ] && [ "${lines[2]}" = "PubkeyAuthentication yes" ] &&
+            [[ "${lines[3]}" =~ ^AllowUsers\ [^[:space:]]+$ ]]
+    }
+fi
+
 TARGET_USER=""
 ADDUSER_BIN="/usr/sbin/adduser"
-SSH_HARDENING_DROPIN="/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf"
+# The hardening drop-in sorts before the other drop-ins, so its values win; earlier versions wrote
+# the legacy name, where a drop-in sorting first could override it.
+SSH_HARDENING_DROPIN="/etc/ssh/sshd_config.d/00-amnezia-host-hardening.conf"
+SSH_LEGACY_HARDENING_DROPIN="/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf"
 UFW_DEFAULTS_FILE="/etc/default/ufw"
 SYSCTL_CONF_FILE="/etc/sysctl.d/99-amnezia-host.conf"
 MODULES_LOAD_FILE="/etc/modules-load.d/99-amnezia-host.conf"
@@ -1726,10 +1771,13 @@ current_ssh_port() {
     printf '%s\n' "${port:-22}"
 }
 
-# Put the previous drop-in back (or remove ours when there was none).
+# Put the previous drop-in ($1) back (or remove ours when there was none), and the earlier
+# version's drop-in ($2) when it was set aside.
 revert_ssh_hardening_dropin() {
     local backup="${1:-}"
+    local legacy_backup="${2:-}"
 
+    [ -z "$legacy_backup" ] || cp -p "$legacy_backup" "$SSH_LEGACY_HARDENING_DROPIN"
     if [ -n "$backup" ]; then
         cp -p "$backup" "$SSH_HARDENING_DROPIN"
     else
@@ -1739,6 +1787,8 @@ revert_ssh_hardening_dropin() {
 
 configure_ssh_hardening() {
     local backup=""
+    local legacy_backup=""
+    local mismatches line
 
     section "SSH hardening"
 
@@ -1756,24 +1806,44 @@ configure_ssh_hardening() {
         backup="$(mktemp)"
         cp -p "$SSH_HARDENING_DROPIN" "$backup"
     fi
+    # The earlier version's drop-in goes once the new one is in place; an operator's file stays.
+    if common_sshd_legacy_dropin_is_ours "$SSH_LEGACY_HARDENING_DROPIN"; then
+        legacy_backup="$(mktemp)"
+        cp -p "$SSH_LEGACY_HARDENING_DROPIN" "$legacy_backup"
+    fi
 
     render_ssh_hardening_dropin > "$SSH_HARDENING_DROPIN"
+    [ -z "$legacy_backup" ] || rm -f "$SSH_LEGACY_HARDENING_DROPIN"
 
     if ! sshd -t; then
         error "SSH configuration test failed; reverting the SSH hardening drop-in ${SSH_HARDENING_DROPIN}"
-        revert_ssh_hardening_dropin "$backup"
-        rm -f "$backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        rm -f "$backup" "$legacy_backup"
+        exit 1
+    fi
+
+    if ! mismatches="$(common_sshd_effective_mismatches "permitrootlogin no" "passwordauthentication no" \
+        "pubkeyauthentication yes" "permitemptypasswords no" "kbdinteractiveauthentication no" \
+        "allowusers ${TARGET_USER}" "port ${SSH_PORT}")"; then
+        error "sshd does not take the hardening values (sshd -T); reverting the SSH hardening drop-in ${SSH_HARDENING_DROPIN}"
+        while IFS= read -r line; do
+            error "  $line"
+        done <<<"${mismatches:-sshd -T failed}"
+        error "A drop-in in $(dirname "$SSH_HARDENING_DROPIN") that sorts first, or a line above the Include in /etc/ssh/sshd_config, sets them"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        rm -f "$backup" "$legacy_backup"
         exit 1
     fi
 
     if ! allow_ssh_port_in_active_firewall; then
-        revert_ssh_hardening_dropin "$backup"
-        rm -f "$backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        rm -f "$backup" "$legacy_backup"
         exit 1
     fi
 
     if ! common_systemd_running; then
-        rm -f "$backup"
+        rm -f "$backup" "$legacy_backup"
+        [ -z "$legacy_backup" ] || log "Removed the drop-in of an earlier version: ${SSH_LEGACY_HARDENING_DROPIN}"
         warn "systemd is not available; restart the SSH service manually to apply the drop-in"
         log "SSH hardening drop-in written (port ${SSH_PORT})"
         return 0
@@ -1781,18 +1851,22 @@ configure_ssh_hardening() {
 
     if ! restart_ssh_service; then
         error "Failed to restart the SSH service with the new configuration (port ${SSH_PORT}); the port may be in use"
-        revert_ssh_hardening_dropin "$backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
         remove_added_ssh_port_rule
         if restart_ssh_service; then
             error "Previous SSH drop-in restored (${SSH_HARDENING_DROPIN}) and the SSH service is running again; the new settings are not applied"
         else
             error "The SSH service still does not start after restoring ${SSH_HARDENING_DROPIN}; check 'systemctl status ssh' and 'journalctl -u ssh' on the console"
         fi
-        rm -f "$backup"
+        rm -f "$backup" "$legacy_backup"
         exit 1
     fi
 
     rm -f "$backup"
+    if [ -n "$legacy_backup" ]; then
+        rm -f "$legacy_backup"
+        log "Removed the drop-in of an earlier version: ${SSH_LEGACY_HARDENING_DROPIN}"
+    fi
     log "SSH hardening drop-in applied (port ${SSH_PORT})"
 }
 

@@ -1336,6 +1336,48 @@ BASHRC
     }
 fi
 
+if ! declare -F common_sshd_effective_mismatches >/dev/null; then
+    # SSH hardening drop-ins. For most keywords sshd keeps the first value it reads, and Debian's
+    # sshd_config includes /etc/ssh/sshd_config.d/*.conf in name order before its own lines, so a
+    # drop-in that sorts first (for example cloud-init's 50-cloud-init.conf before 99-*.conf) wins.
+    # The hardening drop-ins are named 00-*.conf, and the values sshd takes are read back with sshd -T.
+
+    # common_sshd_effective_mismatches <"keyword value">...: prints "keyword: expected <value>,
+    # effective <values>" for each pair that `sshd -T` does not show. Keywords are lower case, as
+    # sshd -T prints them; a keyword that takes several values (allowusers, port) matches when one of
+    # them is the expected one. Match blocks are not applied. Returns 0 when every pair matches, 1 on
+    # a mismatch and 2 when sshd -T fails.
+    common_sshd_effective_mismatches() {
+        local effective pair keyword actual rc=0
+
+        effective="$(sshd -T 2>/dev/null)" || return 2
+        for pair in "$@"; do
+            grep -qxF -- "$pair" <<<"$effective" && continue
+            keyword="${pair%% *}"
+            actual="$(awk -v k="$keyword" '$1 == k { sub(/^[^ ]+ /, ""); v = v (v == "" ? "" : ", ") $0 } END { print v }' <<<"$effective")"
+            printf '%s: expected %s, effective %s\n' "$keyword" "${pair#* }" "${actual:-none}"
+            rc=1
+        done
+        return "$rc"
+    }
+
+    # common_sshd_legacy_dropin_is_ours <file>: <file> is a hardening drop-in that an earlier version
+    # of these scripts wrote under a 99-*.conf name: it starts with the VPS or Amnezia header, or it is
+    # exactly the four lines of the mini-PC. An operator's file with the same name is not ours.
+    common_sshd_legacy_dropin_is_ours() {
+        local file="${1:-}"
+        local lines=()
+
+        [ -f "$file" ] && mapfile -t lines < "$file" 2>/dev/null || return 1
+        case "${lines[0]:-}" in
+            "# SSH Hardening - VPS Optimization" | "# Minimal Amnezia host SSH baseline") return 0 ;;
+        esac
+        [ "${#lines[@]}" -eq 4 ] && [ "${lines[0]}" = "PermitRootLogin no" ] &&
+            [ "${lines[1]}" = "PasswordAuthentication no" ] && [ "${lines[2]}" = "PubkeyAuthentication yes" ] &&
+            [[ "${lines[3]}" =~ ^AllowUsers\ [^[:space:]]+$ ]]
+    }
+fi
+
 if ! declare -F tui_detect_backend >/dev/null; then
     : "${GUM:=/usr/local/bin/gum}"
     : "${TUI_GUM_VERSION:=0.17.0}"
@@ -1767,7 +1809,10 @@ resolve_intel_media_packages() {
 
 # Paths of the system files the steps below write. Constants, so that tests
 # can point them at a temporary tree after sourcing the script.
-SSHD_HARDENING_FILE="/etc/ssh/sshd_config.d/99-hardening.conf"
+# The hardening drop-in sorts before the other drop-ins, so its values win; earlier versions wrote
+# the legacy name, where a drop-in sorting first could override it.
+SSHD_HARDENING_FILE="/etc/ssh/sshd_config.d/00-optimize-hardening.conf"
+SSHD_LEGACY_HARDENING_FILE="/etc/ssh/sshd_config.d/99-hardening.conf"
 FAIL2BAN_JAIL_LOCAL="/etc/fail2ban/jail.local"
 SAMBA_CONF="/etc/samba/smb.conf"
 SAMBA_SHARE_PATH="/mnt/ssd"
@@ -1800,10 +1845,13 @@ restart_ssh_service() {
     systemctl restart ssh.service || systemctl restart sshd.service
 }
 
-# Put the previous drop-in back (or remove ours when there was none).
+# Put the previous drop-in ($1) back (or remove ours when there was none), and the earlier
+# version's drop-in ($2) when it was set aside.
 revert_ssh_hardening_dropin() {
     local backup="${1:-}"
+    local legacy_backup="${2:-}"
 
+    [ -z "$legacy_backup" ] || cp -p "$legacy_backup" "$SSHD_LEGACY_HARDENING_FILE"
     if [ -n "$backup" ]; then
         cp -p "$backup" "$SSHD_HARDENING_FILE"
     else
@@ -1811,15 +1859,17 @@ revert_ssh_hardening_dropin() {
     fi
 }
 
-# Key-only login for $1. The drop-in stays only when `sshd -t` accepts it and
-# SSH restarts with it; otherwise the previous state is restored and 1 returned.
-# The new drop-in is written to a temporary file and moved into place, so a write
-# error never leaves an empty or partial file over the previous one.
+# Key-only login for $1. The drop-in stays only when `sshd -t` accepts it, sshd -T
+# shows its values and SSH restarts with it; otherwise the previous state is restored
+# and 1 returned. The new drop-in is written to a temporary file and moved into place,
+# so a write error never leaves an empty or partial file over the previous one.
 apply_ssh_hardening() {
     local user="$1"
     local dropin_dir
     local backup=""
+    local legacy_backup=""
     local new_file=""
+    local mismatches line
 
     dropin_dir="$(dirname "$SSHD_HARDENING_FILE")"
     if ! mkdir -p "$dropin_dir"; then
@@ -1834,39 +1884,65 @@ apply_ssh_hardening() {
             return 1
         fi
     fi
+    # The earlier version's drop-in goes once the new one is in place; an operator's file stays.
+    if common_sshd_legacy_dropin_is_ours "$SSHD_LEGACY_HARDENING_FILE"; then
+        if ! legacy_backup="$(mktemp)" || ! cp -p "$SSHD_LEGACY_HARDENING_FILE" "$legacy_backup"; then
+            error "Cannot back up $SSHD_LEGACY_HARDENING_FILE; SSH hardening is not applied"
+            rm -f "$backup" "$legacy_backup"
+            return 1
+        fi
+    fi
 
-    if ! new_file="$(mktemp "$dropin_dir/.99-hardening.XXXXXX")" ||
+    if ! new_file="$(mktemp "$dropin_dir/.00-optimize-hardening.XXXXXX")" ||
         ! printf '%s\n' \
             "PermitRootLogin no" \
             "PasswordAuthentication no" \
+            "KbdInteractiveAuthentication no" \
             "PubkeyAuthentication yes" \
             "AllowUsers $user" > "$new_file" ||
         ! chmod 644 "$new_file" ||
         ! mv -f "$new_file" "$SSHD_HARDENING_FILE"; then
         error "Cannot write $SSHD_HARDENING_FILE; SSH hardening is not applied, the previous file is unchanged"
         [ -z "$new_file" ] || rm -f "$new_file"
-        [ -z "$backup" ] || rm -f "$backup"
+        rm -f "$backup" "$legacy_backup"
         return 1
     fi
+    [ -z "$legacy_backup" ] || rm -f "$SSHD_LEGACY_HARDENING_FILE"
 
     if ! sshd -t; then
         error "SSH configuration test failed; reverting $SSHD_HARDENING_FILE, SSH is not restarted"
-        revert_ssh_hardening_dropin "$backup"
-        [ -z "$backup" ] || rm -f "$backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        rm -f "$backup" "$legacy_backup"
+        return 1
+    fi
+
+    if ! mismatches="$(common_sshd_effective_mismatches "permitrootlogin no" "passwordauthentication no" \
+        "kbdinteractiveauthentication no" "pubkeyauthentication yes" "allowusers $user")"; then
+        error "sshd does not take the hardening values (sshd -T); reverting $SSHD_HARDENING_FILE, SSH is not restarted"
+        while IFS= read -r line; do
+            error "  $line"
+        done <<<"${mismatches:-sshd -T failed}"
+        error "A drop-in in $dropin_dir that sorts first, or a line above the Include in /etc/ssh/sshd_config, sets them"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        rm -f "$backup" "$legacy_backup"
         return 1
     fi
 
     if ! restart_ssh_service; then
         error "Failed to restart the SSH service with the hardened configuration; reverting $SSHD_HARDENING_FILE"
-        revert_ssh_hardening_dropin "$backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
         if ! restart_ssh_service; then
             error "SSH still does not restart after the revert; check 'systemctl status ssh' on the console"
         fi
-        [ -z "$backup" ] || rm -f "$backup"
+        rm -f "$backup" "$legacy_backup"
         return 1
     fi
 
-    [ -z "$backup" ] || rm -f "$backup"
+    rm -f "$backup"
+    if [ -n "$legacy_backup" ]; then
+        rm -f "$legacy_backup"
+        log "Removed the drop-in of an earlier version: $SSHD_LEGACY_HARDENING_FILE"
+    fi
     return 0
 }
 
@@ -3256,7 +3332,7 @@ if $INSTALL_SAMBA; then
         if ! grep -q "server min protocol" "$SAMBA_CONF"; then
             sed -i '/\[global\]/a \   server min protocol = SMB2' "$SAMBA_CONF"
         fi
-        
+
         # Disable the default [homes] share (only that section, other sections keep their lines)
         disable_samba_homes_section "$SAMBA_CONF"
         

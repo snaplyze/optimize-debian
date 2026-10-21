@@ -144,14 +144,40 @@ test_config_backup_is_used_for_overwritten_files() {
 # Mocks for sshd and systemctl. Flag files choose what fails.
 SSH_CASE_SETUP='
 SSHD_CONFIG_FILE="$T/sshd_config"
-SSH_HARDENING_FILE="$T/sshd_config.d/99-hardening.conf"
+SSH_HARDENING_FILE="$T/sshd_config.d/00-optimize-hardening.conf"
+SSH_LEGACY_HARDENING_FILE="$T/sshd_config.d/99-hardening.conf"
 mkdir -p "$T/sshd_config.d"
 printf "Include sshd_config.d/*.conf\n" > "$SSHD_CONFIG_FILE"
+# sshd -T: the drop-ins in name order when sshd_config includes them, then sshd_config; the
+# first value of a keyword wins, while allowusers and port add up, as in sshd. Only keywords set
+# in the files are printed.
+sshd_effective() {
+    local file key value
+    local -A seen=()
+    local files=("$SSHD_CONFIG_FILE")
+    ! grep -q "^Include" "$SSHD_CONFIG_FILE" || files=("$T"/sshd_config.d/*.conf "$SSHD_CONFIG_FILE")
+    for file in "${files[@]}"; do
+        [ -f "$file" ] || continue
+        while read -r key value; do
+            case "$key" in "" | "#"* | Include) continue ;; esac
+            key="${key,,}"
+            case "$key" in
+                allowusers | port) ;;
+                *) [ -z "${seen[$key]:-}" ] || continue; seen[$key]=1 ;;
+            esac
+            printf "%s %s\n" "$key" "$value"
+        done < "$file"
+    done
+}
 sshd() {
     event "sshd $*"
     if [ -e "$T/sshd_test_fails" ]; then
         echo "sshd: invalid configuration" >&2
         return 1
+    fi
+    if [ "${1:-}" = -T ]; then
+        [ ! -e "$T/sshd_dump_fails" ] || return 255
+        sshd_effective
     fi
 }
 systemctl() {
@@ -168,7 +194,7 @@ systemctl() {
 }
 reset_ssh_case() {
     : > "$EVENTS"
-    rm -f "$T/sshd_test_fails" "$T/ssh_unit_fails" "$T/sshd_unit_fails" "$SSH_HARDENING_FILE"
+    rm -f "$T/sshd_test_fails" "$T/sshd_dump_fails" "$T/ssh_unit_fails" "$T/sshd_unit_fails" "$T"/sshd_config.d/*.conf
 }
 '
 
@@ -231,7 +257,7 @@ test_ssh_hardening_invalid_config_is_removed() {
         # without a restart and without a success message.
         reset_ssh_case
         saved_file="$SSH_HARDENING_FILE"
-        SSH_HARDENING_FILE="$T/missing-dir/99-hardening.conf"
+        SSH_HARDENING_FILE="$T/missing-dir/00-optimize-hardening.conf"
         run_status configure_ssh_hardening ops
         assert_failed "an unwritable drop-in must fail the step"
         assert_out "Could not write" "write error message"
@@ -258,6 +284,89 @@ test_ssh_hardening_restart_failure_is_visible() {
     '
 }
 
+test_ssh_hardening_paths() {
+    # Debian reads the drop-ins in name order and sshd keeps the first value: ours sorts first.
+    run_case '
+        [ "$SSH_HARDENING_FILE" = /etc/ssh/sshd_config.d/00-optimize-hardening.conf ] || die "the hardening drop-in must sort before the other drop-ins"
+        [ "$SSH_LEGACY_HARDENING_FILE" = /etc/ssh/sshd_config.d/99-hardening.conf ] || die "the drop-in of earlier versions moved"
+    '
+}
+
+test_ssh_hardening_effective_values() {
+    run_case "$SSH_CASE_SETUP"'
+        # A drop-in read after ours, such as 50-cloud-init.conf, does not override it.
+        reset_ssh_case
+        printf "PasswordAuthentication yes\n" > "$T/sshd_config.d/50-cloud-init.conf"
+        run_status configure_ssh_hardening ops
+        assert_rc 0 "a later drop-in must not override the hardening"
+        assert_event "sshd -T"
+        assert_event "systemctl restart ssh.service"
+
+        # A drop-in read first wins: the step fails, ours goes, sshd is not restarted.
+        reset_ssh_case
+        printf "PasswordAuthentication yes\n" > "$T/sshd_config.d/00-aaa.conf"
+        run_status configure_ssh_hardening ops
+        assert_failed "an overridden hardening value must fail the step"
+        assert_out "passwordauthentication: expected no, effective yes" "the overridden value must be named"
+        [ ! -e "$SSH_HARDENING_FILE" ] || die "the overridden drop-in must be removed"
+        [ "$(cat "$T/sshd_config.d/00-aaa.conf")" = "PasswordAuthentication yes" ] || die "the other drop-in must stay"
+        assert_no_event "systemctl restart ssh.service"
+        assert_no_temp_leftovers
+
+        # An sshd_config without the Include of the drop-ins (kept from an older release)
+        # reads none of them: the same.
+        reset_ssh_case
+        printf "PasswordAuthentication yes\n" > "$SSHD_CONFIG_FILE"
+        run_status configure_ssh_hardening ops
+        printf "Include sshd_config.d/*.conf\n" > "$SSHD_CONFIG_FILE"
+        assert_failed "a drop-in sshd does not read must fail the step"
+        assert_out "allowusers: expected ops, effective none" "the missing values must be named"
+        [ ! -e "$SSH_HARDENING_FILE" ] || die "an unread drop-in must be removed"
+        assert_no_event "systemctl restart ssh.service"
+
+        # sshd -T fails: the values cannot be confirmed, so the same.
+        reset_ssh_case
+        : > "$T/sshd_dump_fails"
+        run_status configure_ssh_hardening ops
+        assert_failed "a failed sshd -T must fail the step"
+        assert_out "sshd -T failed" "the failed read-back must be named"
+        [ ! -e "$SSH_HARDENING_FILE" ] || die "an unconfirmed drop-in must be removed"
+        assert_no_event "systemctl restart ssh.service"
+    '
+}
+
+test_ssh_hardening_replaces_the_legacy_dropin() {
+    run_case "$SSH_CASE_SETUP"'
+        # The drop-in of an earlier version goes: its AllowUsers would add to ours.
+        reset_ssh_case
+        printf "# SSH Hardening - VPS Optimization\nPermitRootLogin no\nAllowUsers old\n" > "$SSH_LEGACY_HARDENING_FILE"
+        run_status configure_ssh_hardening ops
+        assert_rc 0 "hardening over an earlier version"
+        [ ! -e "$SSH_LEGACY_HARDENING_FILE" ] || die "the earlier drop-in must be removed"
+        assert_out "Removed the drop-in of an earlier version" "the removal must be reported"
+        [ "$(sshd_effective | grep "^allowusers")" = "allowusers ops" ] || die "only the new AllowUsers may stay"
+        assert_no_temp_leftovers
+
+        # A rejected config puts the earlier drop-in back.
+        reset_ssh_case
+        printf "# SSH Hardening - VPS Optimization\nAllowUsers old\n" > "$SSH_LEGACY_HARDENING_FILE"
+        : > "$T/sshd_test_fails"
+        run_status configure_ssh_hardening ops
+        assert_failed "invalid configuration must fail the step"
+        [ "$(cat "$SSH_LEGACY_HARDENING_FILE")" = "$(printf "# SSH Hardening - VPS Optimization\nAllowUsers old")" ] || \
+            die "the earlier drop-in must be restored"
+        [ ! -e "$SSH_HARDENING_FILE" ] || die "the rejected drop-in must be removed"
+        assert_no_temp_leftovers
+
+        # An operator file with that name is not ours and stays.
+        reset_ssh_case
+        printf "# my settings\nPort 2222\n" > "$SSH_LEGACY_HARDENING_FILE"
+        run_status configure_ssh_hardening ops
+        assert_rc 0 "hardening next to an operator file"
+        [ "$(cat "$SSH_LEGACY_HARDENING_FILE")" = "$(printf "# my settings\nPort 2222")" ] || die "an operator file must stay"
+    '
+}
+
 test_ssh_hardening_step_stops_the_script() {
     # The step must abort the run when hardening fails: the caller exits.
     grep -Fxq 'configure_ssh_hardening "$NEW_USER" || exit 1' "$SCRIPT" || \
@@ -273,7 +382,10 @@ main() {
     test_ssh_hardening_dropin_content
     test_ssh_hardening_invalid_config_is_removed
     test_ssh_hardening_restart_failure_is_visible
+    test_ssh_hardening_effective_values
+    test_ssh_hardening_replaces_the_legacy_dropin
     test_ssh_hardening_step_stops_the_script
+    test_ssh_hardening_paths
     printf 'PASS: %s\n' "$(basename "$0")"
 }
 
