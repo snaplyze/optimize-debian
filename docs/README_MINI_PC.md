@@ -93,7 +93,7 @@ sudo ./optimize_mini_pc.sh
 7.  **Shell:** Fish + Starship (пресет `nerd-font-symbols`, гибридный запуск через `~/.bashrc`).
 8.  **Dev Tools:** Установка Go (закрепленная версия, SHA-256 из скрипта) и Node.js (LTS via fnm; fnm — закрепленный релиз с проверкой SHA-256).
     Node.js-часть рассчитана на **чистую ОС** и не мигрирует старые NVM-конфигурации.
-9.  **Samba:** Настройка безопасного файлового сервера для локальной сети (NTLM отключен, минимальный протокол SMB2). Если выбранный пакет `samba` не установился, скрипт останавливается с ошибкой.
+9.  **Samba:** Настройка безопасного файлового сервера для локальной сети (только NTLMv2: `ntlm auth = ntlmv2-only` — NTLMv1 и LANMAN отключены; минимальный протокол SMB2; заданные администратором значения этих параметров сохраняются). Если выбранный пакет `samba` не установился, скрипт останавливается с ошибкой.
     - **Firewall:** SMB открывается только для локальной подсети: `ufw allow from <подсеть> to any app Samba`. Подсеть берется из маршрута по умолчанию (интерфейс маршрута → его IPv4-адрес → сеть в формате CIDR, например `192.168.1.0/24`) и только если это частная сеть (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) с префиксом не длиннее `/30`. Если подсеть определить нельзя, скрипт спросит ее (Enter — пропустить; сеть не из частных диапазонов потребует подтверждения), а без терминала правило для SMB не добавляется (SMB закрыт в UFW) и печатается команда для ручного открытия. Правило `ufw allow Samba` без ограничения источника, оставшееся от прошлого запуска, удаляется всегда, в том числе когда подсеть не определена. Правило создается только для IPv4: раньше `ufw allow Samba` открывал SMB и по IPv6, теперь доступ по IPv6 закрыт; при необходимости добавьте правило `ufw allow from <IPv6-подсеть> to any app Samba` вручную.
     - **Права на общую папку:** владелец и права `755` ставятся только на корень `/mnt/ssd` (без `-R`) и только при первой настройке общей папки (когда секции `[<имя общей папки>]` еще нет в `smb.conf`). Содержимое диска и права при повторном запуске не меняются. Каталог `/mnt/ssd` должен существовать (смонтированный диск), иначе настройка Samba пропускается.
     - **`smb.conf`:** штатная секция `[homes]` отключается комментированием строк только внутри этой секции, остальные секции не меняются.
@@ -158,7 +158,7 @@ net.ipv4.tcp_fastopen = 3
 net.core.rmem_max = 33554432         # 32MB
 net.core.wmem_max = 33554432
 net.ipv4.tcp_rmem = 4096 262144 33554432
-net.ipv4.tcp_wmem = 4096 65536 33554432
+net.ipv4.tcp_wmem = 4096 262144 33554432
 
 # Network Queues (для множественных одновременных стримов)
 net.core.netdev_max_backlog = 16384
@@ -179,16 +179,16 @@ net.core.default_qdisc = fq
 ### Файловая система и память
 ```bash
 # Swappiness (минимальное использование swap)
-vm.swappiness = 10
+vm.swappiness = 5
 vm.vfs_cache_pressure = 50
 
 # Dirty pages (для стриминга)
-vm.dirty_ratio = 15
-vm.dirty_background_ratio = 5
+vm.dirty_ratio = 20
+vm.dirty_background_ratio = 10
 
 # Увеличенные лимиты файлов
 fs.file-max = 2097152
-fs.inotify.max_user_watches = 524288
+fs.inotify.max_user_watches = 1048576
 ```
 
 ### I/O планировщики (расширенная оптимизация)
@@ -201,7 +201,7 @@ ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/read_ahead_kb}="512"
 # SSD drives - extended optimization
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/nr_requests}="512"
-ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="256"
+ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="512"
 
 # HDD drives
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
@@ -239,7 +239,7 @@ ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue
   - Swappiness=10 для минимального использования
 - 💾 **I/O планировщики** - расширенная оптимизация
   - NVMe: nr_requests=1024, read_ahead=512KB
-  - SSD: nr_requests=512, read_ahead=256KB
+  - SSD: nr_requests=512, read_ahead=512KB
   - HDD: bfq scheduler
 - 📊 **System Limits** - увеличенные лимиты для файлов
 
