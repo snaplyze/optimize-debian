@@ -1698,7 +1698,6 @@ PubkeyAuthentication yes
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
-UsePAM yes
 X11Forwarding no
 ClientAliveInterval 300
 ClientAliveCountMax 2
@@ -1771,18 +1770,33 @@ current_ssh_port() {
     printf '%s\n' "${port:-22}"
 }
 
-# Put the previous drop-in ($1) back (or remove ours when there was none), and the earlier
-# version's drop-in ($2) when it was set aside.
+# Put the previous drop-in back from its temporary copy $1 (or remove ours when there was none),
+# then the earlier version's drop-in from $2. A copy is removed once it is back; one that cannot
+# be put back stays, and its path is printed.
 revert_ssh_hardening_dropin() {
     local backup="${1:-}"
     local legacy_backup="${2:-}"
+    local rc=0
 
-    [ -z "$legacy_backup" ] || cp -p "$legacy_backup" "$SSH_LEGACY_HARDENING_DROPIN"
     if [ -n "$backup" ]; then
-        cp -p "$backup" "$SSH_HARDENING_DROPIN"
+        if cp -p "$backup" "$SSH_HARDENING_DROPIN"; then
+            rm -f "$backup"
+        else
+            error "Could not restore ${SSH_HARDENING_DROPIN}; its previous content is in ${backup}"
+            rc=1
+        fi
     else
         rm -f "$SSH_HARDENING_DROPIN"
     fi
+    if [ -n "$legacy_backup" ]; then
+        if cp -p "$legacy_backup" "$SSH_LEGACY_HARDENING_DROPIN"; then
+            rm -f "$legacy_backup"
+        else
+            error "Could not restore ${SSH_LEGACY_HARDENING_DROPIN}; its previous content is in ${legacy_backup}"
+            rc=1
+        fi
+    fi
+    return "$rc"
 }
 
 configure_ssh_hardening() {
@@ -1817,8 +1831,7 @@ configure_ssh_hardening() {
 
     if ! sshd -t; then
         error "SSH configuration test failed; reverting the SSH hardening drop-in ${SSH_HARDENING_DROPIN}"
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
-        rm -f "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         exit 1
     fi
 
@@ -1830,14 +1843,12 @@ configure_ssh_hardening() {
             error "  $line"
         done <<<"${mismatches:-sshd -T failed}"
         error "A drop-in in $(dirname "$SSH_HARDENING_DROPIN") that sorts first, or a line above the Include in /etc/ssh/sshd_config, sets them"
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
-        rm -f "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         exit 1
     fi
 
     if ! allow_ssh_port_in_active_firewall; then
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
-        rm -f "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         exit 1
     fi
 
@@ -1851,14 +1862,13 @@ configure_ssh_hardening() {
 
     if ! restart_ssh_service; then
         error "Failed to restart the SSH service with the new configuration (port ${SSH_PORT}); the port may be in use"
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         remove_added_ssh_port_rule
         if restart_ssh_service; then
             error "Previous SSH drop-in restored (${SSH_HARDENING_DROPIN}) and the SSH service is running again; the new settings are not applied"
         else
             error "The SSH service still does not start after restoring ${SSH_HARDENING_DROPIN}; check 'systemctl status ssh' and 'journalctl -u ssh' on the console"
         fi
-        rm -f "$backup" "$legacy_backup"
         exit 1
     fi
 
