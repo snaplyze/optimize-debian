@@ -1099,7 +1099,7 @@ test_backports_kernel_comes_from_backports() {
     run_case '
         INSTALL_KERNEL_BACKPORTS=true
         BACKPORTS_SOURCES_FILE="$T/debian-backports.sources"
-        detect_debian_version() { printf "12\n"; }
+        VERSION_ID=12
         dpkg() {
             case "$1" in
                 --print-architecture) printf "amd64\n" ;;
@@ -1133,6 +1133,20 @@ test_backports_kernel_comes_from_backports() {
         assert_failed "a failed Backports kernel installation must fail the step"
         assert_no_out "installed successfully" "failure"
 
+    '
+    # Debian 13 already has a modern kernel: no Backports source, nothing installed.
+    run_case '
+        INSTALL_KERNEL_BACKPORTS=true
+        BACKPORTS_SOURCES_FILE="$T/debian-backports.sources"
+        VERSION_ID=13
+        common_apt_update() { event "apt-update $1"; }
+        common_safe_install() { event "safe_install $*"; }
+
+        run_status install_backports_kernel
+        assert_rc 0 "install_backports_kernel on Debian 13"
+        assert_out "already includes a modern kernel" "the skip on Debian 13 is reported"
+        [ ! -e "$BACKPORTS_SOURCES_FILE" ] || die "Debian 13 must not get a Backports source"
+        assert_no_event_matches "^(apt-update|safe_install)"
     '
 }
 
