@@ -37,14 +37,17 @@
 ## Как связаны скрипты, lib, тесты и CI
 
 ```mermaid
-flowchart LR
-    LIB["lib/common.sh, lib/tui.sh"] -- "source, если есть $SCRIPT_DIR/lib" --> S["optimize_*.sh"]
-    LIB -- "встроенные копии под if ! declare -F" --> S
-    S -- "bash <(curl ...): lib/ нет, работают копии" --> M["Целевая машина"]
-    T["tests/*.sh"] -- "source с OPTIMIZE_SOURCE_ONLY=1" --> LIB
-    T -- "test_embedded_copies.sh: копия == lib" --> S
-    CI["ci.yml: bash -n, shellcheck, tests"] --> T
-    CI -- "обязательная checks" --> R["main → тег vГГГГ.ММ.ДД → Release"]
+flowchart TD
+    subgraph GH["GitHub"]
+        CI["ci.yml: bash -n,<br>shellcheck, tests"] -- "обязательная checks" --> R["main → тег → Release"]
+    end
+    subgraph REPO["Репозиторий"]
+        T["tests/*.sh"] -- "source" --> LIB["lib/common.sh,<br>lib/tui.sh"]
+        T -- "копия == lib" --> S["optimize_*.sh"]
+        LIB -- "source или<br>встроенные копии" --> S
+    end
+    CI --> T
+    S -- "bash <(curl ...):<br>работают копии" --> M["Целевая машина"]
 ```
 
 Пользователь запускает скрипт как `bash <(curl -fsSL .../main/<script>.sh)`: рядом нет `lib/`, поэтому в каждом `optimize_*.sh` лежат копии нужных ему функций `lib/`. Единственная реализация — в `lib/`; тесты проверяют `lib/`, а `tests/test_embedded_copies.sh` проверяет, что каждая копия совпадает с `lib/` байт в байт. Изменил функцию в `lib/` — измени ее копии во всех скриптах, где она есть.

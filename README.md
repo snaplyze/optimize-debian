@@ -20,11 +20,11 @@ Bash-скрипты, которые настраивают чистую Debian 1
 
 | Скрипт | Для чего | Debian | Версия скрипта | Руководство |
 |---|---|---|---|---|
-| `optimize_vps.sh` | VPN-сервер на VPS с 1–4 GB RAM: ядро Debian Backports, sysctl под 10 Гбит/с, Fish + Starship, Go, Node.js/fnm, Docker, закалка SSH, Fail2Ban, UFW | 12, 13 | 3.0.0 | [docs/README_VPS.md](docs/README_VPS.md) |
-| `optimize_amnezia_host.sh` | Хост под AmneziaVPN self-hosted: только база для приложения Amnezia, параметры флагами, firewall в две фазы | 12, 13 | 0.3.0 | [docs/README_AMNEZIA_HOST.md](docs/README_AMNEZIA_HOST.md) |
-| `optimize_mini_pc.sh` | Домашний и медиасервер на Intel N5095: ядро Debian Backports, Intel QuickSync, Samba, Docker, Fish + Starship | 12, 13 | 2.0.0 | [docs/README_MINI_PC.md](docs/README_MINI_PC.md) |
-| `optimize_wsl2.sh` | WSL2 для разработки и ML: systemd в `wsl.conf`, Fish + Starship, Go, Node.js/fnm, Docker, NVIDIA Container Toolkit и CUDA | 12, 13 | 4.1.0 | [docs/README_WSL2.md](docs/README_WSL2.md) |
-| `upgrade-to-debian13.sh` | Обновление серверной Debian до 13 с бэкапом и проверкой SSH после каждого шага; не для WSL2 | 11, 12 | 2.0.3 | [docs/README_UPGRADE.md](docs/README_UPGRADE.md) |
+| `optimize_vps.sh` | VPN-сервер на VPS с 1–4 GB RAM: ядро Debian Backports, sysctl под 10 Гбит/с, Fish + Starship, Go, Node.js/fnm, Docker, закалка SSH, Fail2Ban, UFW | 12, 13 | 3.0.0 | [руководство](docs/README_VPS.md) |
+| `optimize_amnezia_host.sh` | Хост под AmneziaVPN self-hosted: только база для приложения Amnezia, параметры флагами, firewall в две фазы | 12, 13 | 0.3.0 | [руководство](docs/README_AMNEZIA_HOST.md) |
+| `optimize_mini_pc.sh` | Домашний и медиасервер на Intel N5095: ядро Debian Backports, Intel QuickSync, Samba, Docker, Fish + Starship | 12, 13 | 2.0.0 | [руководство](docs/README_MINI_PC.md) |
+| `optimize_wsl2.sh` | WSL2 для разработки и ML: systemd в `wsl.conf`, Fish + Starship, Go, Node.js/fnm, Docker, NVIDIA Container Toolkit и CUDA | 12, 13 | 4.1.0 | [руководство](docs/README_WSL2.md) |
+| `upgrade-to-debian13.sh` | Обновление серверной Debian до 13 с бэкапом и проверкой SSH после каждого шага; не для WSL2 | 11, 12 | 2.0.3 | [руководство](docs/README_UPGRADE.md) |
 
 Версия скрипта — значение `SCRIPT_VERSION` в его коде; `bash <скрипт> --help` печатает ее без root. Четыре `optimize_*.sh` при запуске проверяют версию Debian и на любой другой завершаются сразу.
 
@@ -137,14 +137,13 @@ sudo ./upgrade-to-debian13.sh --yes --allow-two-hop-no-reboot
 
 ```mermaid
 flowchart TD
-    A["Загрузка целиком: curl -fsSL, bash читает весь файл"] --> B["Последняя строка вызывает optimize_main: шаги идут только из нее"]
-    B --> C{"root? Debian 12 или 13?"}
-    C -->|нет| X["Выход без изменений"]
-    C -->|да| D["Меню компонентов: gum или plain prompt"]
-    D --> E["Шаги (набор зависит от скрипта): пользователь и sudoers, локали, Fish + Starship, Go и Node.js, ядро, Docker, sysctl, swap, UFW, Fail2Ban, SSH"]
-    E --> F{"В рискованных шагах: sshd -t и sshd -T, visudo -cf, SHA-256 загрузок"}
-    F -->|расхождение| R["Шаг откатывается: drop-in SSH снимается, sudoers не меняется, файл не ставится"]
-    F -->|совпало| G["Итог и лог /var/log/*_optimization.log, предложение перезагрузки"]
+    A["Загрузка целиком,<br>затем optimize_main"] --> C["Проверка: root,<br>Debian 12/13"]
+    C -->|иначе| X["Выход без изменений"]
+    C --> D["Меню компонентов"]
+    D --> E["Шаги: пользователь,<br>Fish, ядро, Docker,<br>sysctl, UFW, SSH"]
+    E --> F["Проверки шага:<br>sshd -t, sshd -T,<br>visudo -cf, SHA-256"]
+    F -->|расхождение| R["Откат шага"]
+    F -->|сошлось| G["Итог, лог,<br>предложение reboot"]
 ```
 
 Так работают `optimize_mini_pc.sh` и `optimize_wsl2.sh` (WSL2 дополнительно проверяет, что это WSL; ядра, swap, UFW, Fail2Ban и закалки SSH у него нет — какие шаги есть у каждого скрипта, см. [Возможности](#возможности)). `optimize_vps.sh` меню компонентов не показывает: он спрашивает имя пользователя, ключ SSH, имя хоста, локаль и часовой пояс, ждет Enter после проверки входа по SSH, остальные шаги идут все. `optimize_amnezia_host.sh` берет параметры из флагов, подтверждает запуск (без `--yes`) и выполняет один фиксированный проход `main`. `upgrade-to-debian13.sh` идет своим маршрутом: проверки, бэкап в `/root/upgrade-backup-<TS>/`, шаги `11 -> 12` и `12 -> 13` с проверкой `sshd -t` и портов SSH после каждого, лог в `/var/log/debian-upgrade/`.

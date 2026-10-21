@@ -178,10 +178,10 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$T
 
 ```mermaid
 flowchart LR
-    A["Первый запуск: --firewall-phase bootstrap (по умолчанию)"] --> B["UFW: ssh-port/tcp, xray-port/tcp и весь входящий UDP: правило Temporary AmneziaWG bootstrap allowance"]
-    B --> C["Приложение Amnezia ставит протоколы, AmneziaWG закреплен на 8443/udp"]
-    C --> D["Повторный запуск: --firewall-phase locked"]
-    D --> E["UFW: ssh-port/tcp, xray-port/tcp, 8443/udp; временное правило UDP удалено"]
+    A["Первый<br>запуск:<br>bootstrap"] --> B["UFW: ssh/tcp,<br>xray/tcp,<br>весь UDP"]
+    B --> C["Приложение<br>Amnezia:<br>AmneziaWG<br>на 8443/udp"]
+    C --> D["Повторный<br>запуск:<br>locked"]
+    D --> E["UFW: ssh/tcp,<br>xray/tcp,<br>8443/udp;<br>UDP снят"]
 ```
 
 | Фаза | Когда | Правила UFW |

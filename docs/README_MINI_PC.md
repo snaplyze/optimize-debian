@@ -150,14 +150,13 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$T
 
 ```mermaid
 flowchart TD
-    A["Копия прежнего 00-*.conf и 99-hardening.conf прежних версий"] --> B["Новый drop-in через временный файл и mv"]
-    B --> C{"sshd -t"}
-    C -- "ошибка" --> R["Откат drop-in, sshd не перезапускается"]
-    C -- "ок" --> D{"sshd -T: все пять значений действуют?"}
-    D -- "нет: печатает расхождения" --> R
-    D -- "да" --> E{"systemctl restart ssh"}
-    E -- "ошибка" --> R2["Откат drop-in и повторный перезапуск"]
-    E -- "ок" --> F["Ожидание Enter: проверьте вход ключом во втором терминале"]
+    A["Новый drop-in 00-*.conf"] --> C{"sshd -t?"}
+    C -- "ошибка" --> R["Откат drop-in,<br>sshd не перезапускается"]
+    C -- "ок" --> D{"sshd -T совпал?"}
+    D -- "нет" --> R
+    D -- "да" --> E{"restart ssh?"}
+    E -- "ошибка" --> R2["Откат drop-in,<br>повторный перезапуск"]
+    E -- "ок" --> F["Enter: проверьте вход<br>во втором терминале"]
 ```
 
 - Прежний `00-optimize-hardening.conf` копируется во временный файл и возвращается при откате; `99-hardening.conf` удаляется, только если это файл прежней версии скрипта (ровно четыре строки `PermitRootLogin no`, `PasswordAuthentication no`, `PubkeyAuthentication yes`, `AllowUsers ...` или заголовок VPS/Amnezia); файл администратора с тем же именем остается.

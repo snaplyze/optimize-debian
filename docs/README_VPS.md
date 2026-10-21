@@ -111,13 +111,10 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$T
 
 ```mermaid
 flowchart LR
-    A["Проверки: аргументы, root, Debian 12/13"] --> B["Пользователь, sudo, ключ SSH"]
-    B --> C["Локаль, hostname, часовой пояс, NTP"]
-    C --> D["Fish, Starship, Bash, Go, fnm"]
-    D --> E["Обновление, пакеты, ядро, Docker"]
-    E --> F["sysctl, swap, UFW, Fail2Ban, лимиты"]
-    F --> G["Закалка SSH, tmpfs, udev, governor, утилиты"]
-    G --> H["Итог и предложение перезагрузки"]
+    A["Проверки,<br>пользователь,<br>ключ SSH"] --> B["Локаль, NTP,<br>Fish, Go, fnm"]
+    B --> C["Обновление,<br>ядро, Docker,<br>sysctl, swap"]
+    C --> D["UFW, Fail2Ban,<br>лимиты,<br>закалка SSH"]
+    D --> E["Утилиты,<br>итог"]
 ```
 
 1. **Проверки.** Разбор аргумента, проверка `EUID`, `tui_init` (gum 0.17.0 скачивается с проверкой SHA-256 в `/usr/local/bin/gum`: в `auto` только при выводе в терминал, при `TUI_BACKEND=gum` всегда). Чтение `/etc/os-release`: не Debian или не 12/13 — стоп. Если установлен `cloud-init`, есть `/etc/network/interfaces.d/50-cloud-init` и `/etc/network/interfaces` сам описывает интерфейсы кроме `lo`, скрипт пишет `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` (`network: {config: disabled}`) и переименовывает `50-cloud-init` в `50-cloud-init.disabled-by-optimize.<дата>-<ЧЧММСС>`, чтобы после перезагрузки не было двух DHCP-клиентов.
