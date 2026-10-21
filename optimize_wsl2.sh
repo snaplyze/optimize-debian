@@ -716,6 +716,565 @@ if ! declare -F common_temp_dir >/dev/null; then
     }
 fi
 
+if ! declare -F common_render_fish_config >/dev/null; then
+    # common_render_fish_config <vps|mini|wsl2>: ~/.config/fish/config.fish of a profile.
+    common_render_fish_config() {
+        local profile="${1:-}"
+
+        case "$profile" in
+            vps) printf '%s\n' '# ~/.config/fish/config.fish' ;;
+            mini) printf '%s\n' '# ~/.config/fish/config.fish - Mini PC Media/Home Server' ;;
+            wsl2) printf '%s\n' '# ~/.config/fish/config.fish - WSL2 Optimized Configuration' ;;
+            *) return 1 ;;
+        esac
+        cat <<'FISH_EOF'
+set -g fish_greeting ""
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+
+# WSL2 Environment Variables
+set -gx EDITOR code
+set -gx VISUAL code
+set -gx BROWSER "/mnt/c/Windows/System32/cmd.exe /c start"
+set -gx DISPLAY ":0"
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+
+# Environment & Paths
+if test -d /usr/local/go/bin
+    fish_add_path /usr/local/go/bin
+end
+if test -d $HOME/go/bin
+    fish_add_path $HOME/go/bin
+end
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+if test -d /usr/local/cuda
+    set -gx CUDA_HOME /usr/local/cuda
+    fish_add_path /usr/local/cuda/bin
+    if test -d /usr/local/cuda/lib64
+        set -gx LD_LIBRARY_PATH /usr/local/cuda/lib64 $LD_LIBRARY_PATH
+    end
+end
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+if test -d /usr/sbin
+    fish_add_path /usr/sbin
+end
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+if test -d /mnt/c/Windows/System32
+    fish_add_path /mnt/c/Windows/System32
+end
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+
+# Fast Node Manager (fnm) hook
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+if test -d "$HOME/.local/share/fnm"
+    set -gx FNM_PATH "$HOME/.local/share/fnm"
+    fish_add_path -g "$FNM_PATH"
+end
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+if command -v fnm >/dev/null 2>&1
+    fnm env --use-on-cd --shell fish | source
+end
+
+# System Aliases
+alias ll="ls -alFh"
+alias la="ls -A"
+alias l="ls -CF"
+alias cls="clear"
+alias c="clear"
+alias h="history"
+alias ..="cd .."
+alias ...="cd ../.."
+alias ....="cd ../../.."
+alias .....="cd ../../../.."
+
+# System Monitoring Aliases
+alias meminfo="free -h"
+alias cpuinfo="lscpu"
+alias diskinfo="df -h"
+alias ports="ss -tulpn"
+alias psa="ps aux"
+FISH_EOF
+        if [ "$profile" = mini ]; then
+            cat <<'FISH_EOF'
+
+# Hardware Monitoring (GPU & Sensors)
+alias gpuinfo="vainfo 2>/dev/null || intel_gpu_top"
+alias temp="sensors"
+FISH_EOF
+        fi
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+alias psg="ps aux | grep"
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+
+# Package Management Aliases
+alias update="sudo apt update && sudo apt upgrade -y"
+alias install="sudo apt install"
+alias remove="sudo apt remove"
+alias search="apt search"
+alias autoremove="sudo apt autoremove -y"
+
+# Docker Aliases
+alias d="docker"
+alias dc="docker compose"
+alias dps="docker ps"
+alias dpsa="docker ps -a"
+alias di="docker images"
+alias dcu="docker compose up -d"
+alias dcd="docker compose down"
+alias dcl="docker compose logs -f"
+alias dex="docker exec -it"
+alias drm="docker rm"
+alias drmi="docker rmi"
+alias dprune="docker system prune -af"
+
+# Git Aliases
+alias g="git"
+alias gs="git status"
+alias gst="git status"
+alias ga="git add"
+alias gaa="git add --all"
+alias gc="git commit"
+alias gcm="git commit -m"
+alias gca="git commit -a"
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+alias gcam="git commit -am"
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+alias gp="git pull"
+alias gP="git push"
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+alias gpo="git push origin"
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+alias gl="git log --oneline --graph --decorate"
+alias gd="git diff"
+FISH_EOF
+        if [ "$profile" = wsl2 ]; then
+            cat <<'FISH_EOF'
+alias gb="git branch"
+alias gco="git checkout"
+alias gcb="git checkout -b"
+
+# WSL2 Helper Functions
+function explorer
+    if test (count $argv) -gt 0
+        explorer.exe (wslpath -w "$argv[1]")
+    else
+        explorer.exe (wslpath -w ".")
+    end
+end
+
+function cmd
+    cmd.exe /c "$argv"
+end
+
+function powershell
+    powershell.exe -Command "$argv"
+end
+
+function wslperf
+    echo "=== WSL Performance ==="
+    echo "Memory: "(free -h | grep '^Mem:' | awk '{print $3"/"$2}')
+    echo "CPU: "(top -bn1 | grep 'Cpu(s):' | awk '{print $2}' | cut -d'%' -f1)"%"
+    echo "Disk: "(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')
+end
+
+function mkcd
+    mkdir -p "$argv[1]"; and cd "$argv[1]"
+end
+FISH_EOF
+        fi
+        cat <<'FISH_EOF'
+
+# Interactive starship prompt
+if status is-interactive
+    if command -v starship >/dev/null 2>&1
+        starship init fish | source
+    end
+end
+FISH_EOF
+    }
+
+    # common_render_bashrc <vps|mini|wsl2>: ~/.bashrc of a profile. It starts the interactive Fish
+    # session, so the Fish step does not write ~/.bashrc itself.
+    common_render_bashrc() {
+        local profile="${1:-}"
+
+        case "$profile" in
+            vps) printf '%s\n' '# VPS Optimized Bash Configuration' ;;
+            mini) printf '%s\n' '# Mini PC Optimized Bash Configuration' ;;
+            wsl2) printf '%s\n' '# WSL2 Optimized Bash Configuration' ;;
+            *) return 1 ;;
+        esac
+        cat <<'BASHRC'
+
+# Auto-switch to Fish for interactive sessions only
+# Non-interactive SSH commands, cron, scp/rsync stay in standard Bash
+if [[ $- == *i* ]] && [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && command -v fish >/dev/null 2>&1; then
+    exec fish
+fi
+
+# ============================================
+# Shell Options
+# ============================================
+
+# History configuration
+HISTSIZE=50000
+HISTFILESIZE=100000
+HISTCONTROL=ignoreboth:erasedups
+HISTTIMEFORMAT="%F %T "
+shopt -s histappend
+
+# Navigation and behavior
+shopt -s autocd           # cd to directory just by typing its name
+shopt -s cdspell          # autocorrect typos in path names when using cd
+shopt -s dirspell         # autocorrect typos in directory names during completion
+shopt -s globstar         # ** recursive glob
+shopt -s checkwinsize     # update LINES and COLUMNS after each command
+shopt -s nocaseglob       # case-insensitive globbing
+
+# Completion options
+shopt -s no_empty_cmd_completion
+
+# ============================================
+# Bash Completion
+# ============================================
+
+if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+fi
+
+# ============================================
+# Environment Variables
+# ============================================
+
+BASHRC
+        if [ "$profile" = wsl2 ]; then
+            cat <<'BASHRC'
+# WSL2-specific environment variables
+export EDITOR='code'
+export VISUAL='code'
+export BROWSER="/mnt/c/Windows/System32/cmd.exe /c start"
+export DISPLAY=":0"
+BASHRC
+        fi
+        if [ "$profile" = vps ] || [ "$profile" = mini ]; then
+            cat <<'BASHRC'
+export EDITOR='vim'
+export VISUAL='vim'
+export PAGER='less'
+BASHRC
+        fi
+        cat <<'BASHRC'
+
+BASHRC
+        if [ "$profile" = wsl2 ]; then
+            cat <<'BASHRC'
+# Path optimization for WSL
+export PATH="/usr/local/bin:/usr/bin:$PATH"
+BASHRC
+        fi
+        if [ "$profile" = vps ] || [ "$profile" = mini ]; then
+            cat <<'BASHRC'
+# Path optimization
+export PATH="/usr/local/bin:/usr/bin:/usr/sbin:/sbin:$PATH"
+BASHRC
+        fi
+        cat <<'BASHRC'
+
+# ============================================
+# Prompt Configuration
+# ============================================
+
+# Colors for prompt
+if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
+    # We have color support
+    PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+    PS1='\u@\h:\w\$ '
+fi
+
+# If Starship is installed, use it
+if command -v starship >/dev/null 2>&1; then
+    eval "$(starship init bash)"
+fi
+
+# ============================================
+# Docker Aliases
+# ============================================
+
+alias d='docker'
+alias dc='docker compose'
+alias dps='docker ps'
+alias dpsa='docker ps -a'
+alias di='docker images'
+alias dcu='docker compose up -d'
+alias dcd='docker compose down'
+alias dcl='docker compose logs -f'
+alias dex='docker exec -it'
+alias drm='docker rm'
+alias drmi='docker rmi'
+alias dprune='docker system prune -af'
+
+# ============================================
+# Git Aliases
+# ============================================
+
+alias g='git'
+alias gs='git status'
+alias gst='git status'
+alias ga='git add'
+alias gaa='git add --all'
+alias gc='git commit'
+alias gcm='git commit -m'
+alias gca='git commit -a'
+alias gcam='git commit -am'
+alias gp='git pull'
+alias gP='git push'
+alias gpo='git push origin'
+alias gl='git log --oneline --graph --decorate'
+alias gd='git diff'
+alias gb='git branch'
+alias gco='git checkout'
+alias gcb='git checkout -b'
+
+# ============================================
+# System Aliases
+# ============================================
+
+alias ll='ls -alFh'
+alias la='ls -A'
+alias l='ls -CF'
+alias cls='clear'
+alias c='clear'
+alias h='history'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias .....='cd ../../../..'
+
+# System monitoring
+alias meminfo='free -h'
+alias cpuinfo='lscpu'
+alias diskinfo='df -h'
+alias ports='ss -tulpn'
+alias psa='ps aux'
+alias psg='ps aux | grep'
+
+# Package management
+alias update='sudo apt update && sudo apt upgrade -y'
+alias install='sudo apt install'
+alias remove='sudo apt remove'
+alias search='apt search'
+alias autoremove='sudo apt autoremove -y'
+
+# Safety aliases
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
+alias mkdir='mkdir -pv'
+
+# ============================================
+BASHRC
+        if [ "$profile" = wsl2 ]; then
+            cat <<'BASHRC'
+# WSL2-specific Functions
+# ============================================
+
+explorer() {
+    if [ -z "$1" ]; then
+        explorer.exe .
+    else
+        explorer.exe "$(wslpath -w "$1")"
+    fi
+}
+
+cmd() {
+    cmd.exe /c "$*"
+}
+
+powershell() {
+    powershell.exe -Command "$*"
+}
+
+wslperf() {
+    echo "=== WSL Performance ==="
+    echo "Memory: $(free -h | grep '^Mem:' | awk '{print $3"/"$2}')"
+    echo "CPU: $(top -bn1 | grep 'Cpu(s):' | awk '{print $2}' | cut -d'%' -f1)%"
+    echo "Disk: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
+}
+
+# ============================================
+BASHRC
+        fi
+        cat <<'BASHRC'
+# Useful Functions
+# ============================================
+
+mkcd() {
+    mkdir -p "$1" && cd "$1"
+}
+
+extract() {
+    if [ -f "$1" ]; then
+        case "$1" in
+            *.tar.bz2)   tar xjf "$1"     ;;
+            *.tar.gz)    tar xzf "$1"     ;;
+            *.bz2)       bunzip2 "$1"     ;;
+            *.rar)       unrar e "$1"     ;;
+            *.gz)        gunzip "$1"      ;;
+            *.tar)       tar xf "$1"      ;;
+            *.tbz2)      tar xjf "$1"     ;;
+            *.tgz)       tar xzf "$1"     ;;
+            *.zip)       unzip "$1"       ;;
+            *.Z)         uncompress "$1"  ;;
+            *.7z)        7z x "$1"        ;;
+            *)           echo "'$1' cannot be extracted via extract()" ;;
+        esac
+    else
+        echo "'$1' is not a valid file"
+    fi
+}
+
+# ============================================
+# fnm (Fast Node Manager)
+# ============================================
+
+export FNM_PATH="$HOME/.local/share/fnm"
+export PATH="$FNM_PATH:$PATH"
+export XDG_RUNTIME_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/fnm-runtime"
+mkdir -p "$XDG_RUNTIME_DIR"
+if command -v fnm >/dev/null 2>&1; then
+    eval "$(fnm env --use-on-cd --shell bash)"
+fi
+
+# ============================================
+BASHRC
+        if [ "$profile" = vps ] || [ "$profile" = mini ]; then
+            cat <<'BASHRC'
+# Go Configuration
+# ============================================
+
+export GOROOT=/usr/local/go
+export GOPATH=$HOME/go
+export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
+
+# ============================================
+BASHRC
+        fi
+        cat <<'BASHRC'
+# Additional Settings
+# ============================================
+
+# Enable color support for ls and grep
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# Improved less
+export LESS='-R -F -X'
+export LESSOPEN='| /usr/bin/lesspipe %s 2>&-'
+BASHRC
+        if [ "$profile" = wsl2 ]; then
+            cat <<'BASHRC'
+
+# ============================================
+# Welcome Message (optional)
+# ============================================
+
+# Uncomment to show system info on login
+# if [ -t 0 ]; then
+#     echo "Welcome to WSL2 - $(lsb_release -d | cut -f2)"
+#     echo "$(uname -r)"
+# fi
+BASHRC
+        fi
+    }
+
+    # common_setup_fish <user> <home> <profile>: Starship's nerd-font-symbols preset and the
+    # profile's config.fish in <home>/.config, owned by <user>. ~/.bashrc, which starts Fish for
+    # interactive sessions, is written by common_setup_bashrc. Returns 1 without touching anything
+    # when <home> is missing: root does not create a user's home here.
+    common_setup_fish() {
+        local user="${1:-}" home="${2:-}" profile="${3:-}"
+        local config
+
+        if [ -z "$home" ] || [ ! -d "$home" ]; then
+            warn "Home directory ${home:-(none)} of $user is missing; its Fish configuration is skipped"
+            return 1
+        fi
+        config="$(common_render_fish_config "$profile")" || return 1
+        install -d -m 0755 "$home/.config/fish" || return 1
+        if command -v starship >/dev/null 2>&1; then
+            starship preset nerd-font-symbols > "$home/.config/starship.toml" 2>/dev/null || true
+            chmod 644 "$home/.config/starship.toml" 2>/dev/null || true
+        fi
+        printf '%s\n' "$config" > "$home/.config/fish/config.fish" || return 1
+        chmod 644 "$home/.config/fish/config.fish"
+        chown -R "$user:" "$home/.config" 2>/dev/null || true
+    }
+
+    # common_setup_bashrc <user> <home> <profile>: the profile's ~/.bashrc, owned by <user>. A .bashrc
+    # that none of the profiles wrote is copied first, with its owner and mode, to a new file
+    # .bashrc.backup.<time>.<suffix> (mktemp: a name prepared in the user's home is not followed), so
+    # a repeated run makes no new copy. Returns 1 without touching anything when <home> is missing.
+    common_setup_bashrc() {
+        local user="${1:-}" home="${2:-}" profile="${3:-}"
+        local bashrc="${2:-}/.bashrc"
+        local config backup
+
+        if [ -z "$home" ] || [ ! -d "$home" ]; then
+            warn "Home directory ${home:-(none)} of $user is missing; its Bash configuration is skipped"
+            return 1
+        fi
+        config="$(common_render_bashrc "$profile")" || return 1
+        if [ -f "$bashrc" ] && ! head -n 1 "$bashrc" | grep -qE '^# (VPS|Mini PC|WSL2) Optimized Bash Configuration$'; then
+            # Without a copy the user's own .bashrc is not replaced.
+            if ! backup="$(mktemp "$bashrc.backup.$(date +%Y%m%d_%H%M%S).XXXXXX")" || ! cat "$bashrc" > "$backup"; then
+                warn "Could not back up the existing .bashrc of $user; it is left as it is"
+                return 1
+            fi
+            chown --reference="$bashrc" "$backup" 2>/dev/null || true
+            chmod --reference="$bashrc" "$backup" 2>/dev/null || true
+            log "Backed up existing .bashrc for $user to $backup"
+        fi
+        printf '%s\n' "$config" > "$bashrc" || return 1
+        if [ "$user" != root ]; then
+            chown "$user:" "$bashrc" 2>/dev/null || true
+        fi
+    }
+fi
+
 if ! declare -F tui_detect_backend >/dev/null; then
     : "${GUM:=/usr/local/bin/gum}"
     : "${TUI_GUM_VERSION:=0.17.0}"
@@ -1836,176 +2395,17 @@ if $INSTALL_FISH; then
         warn "Starship could not be installed"
     fi
 
-    # Function to setup Fish for a user
     setup_fish_for_user() {
         local username=$1
         local user_home
         user_home=$(common_user_home "$username" || echo "/home/$username")
 
         log "Setting up Fish + Starship for user: $username"
-
-        # Create config directories
-        install -d -m 0755 "$user_home/.config/fish"
-
-        # Generate starship preset nerd-font-symbols
-        if command -v starship >/dev/null 2>&1; then
-            starship preset nerd-font-symbols > "$user_home/.config/starship.toml" 2>/dev/null || true
-            chmod 644 "$user_home/.config/starship.toml" 2>/dev/null || true
+        if common_setup_fish "$username" "$user_home" wsl2; then
+            log "Fish + Starship (nerd-font-symbols) configured for $username"
+        else
+            warn "Fish configuration failed for $username"
         fi
-
-        # Write ~/.config/fish/config.fish
-        cat > "$user_home/.config/fish/config.fish" <<'FISH_EOF'
-# ~/.config/fish/config.fish - WSL2 Optimized Configuration
-set -g fish_greeting ""
-
-# WSL2 Environment Variables
-set -gx EDITOR code
-set -gx VISUAL code
-set -gx BROWSER "/mnt/c/Windows/System32/cmd.exe /c start"
-set -gx DISPLAY ":0"
-
-# Paths
-if test -d /usr/local/go/bin
-    fish_add_path /usr/local/go/bin
-end
-if test -d $HOME/go/bin
-    fish_add_path $HOME/go/bin
-end
-if test -d /usr/local/cuda
-    set -gx CUDA_HOME /usr/local/cuda
-    fish_add_path /usr/local/cuda/bin
-    if test -d /usr/local/cuda/lib64
-        set -gx LD_LIBRARY_PATH /usr/local/cuda/lib64 $LD_LIBRARY_PATH
-    end
-end
-if test -d /usr/sbin
-    fish_add_path /usr/sbin
-end
-if test -d /mnt/c/Windows/System32
-    fish_add_path /mnt/c/Windows/System32
-end
-
-# Fast Node Manager (fnm) hook
-if test -d "$HOME/.local/share/fnm"
-    set -gx FNM_PATH "$HOME/.local/share/fnm"
-    fish_add_path -g "$FNM_PATH"
-end
-if command -v fnm >/dev/null 2>&1
-    fnm env --use-on-cd --shell fish | source
-end
-
-# System Aliases
-alias ll="ls -alFh"
-alias la="ls -A"
-alias l="ls -CF"
-alias cls="clear"
-alias c="clear"
-alias h="history"
-alias ..="cd .."
-alias ...="cd ../.."
-alias ....="cd ../../.."
-alias .....="cd ../../../.."
-
-# System Monitoring
-alias meminfo="free -h"
-alias cpuinfo="lscpu"
-alias diskinfo="df -h"
-alias ports="ss -tulpn"
-alias psa="ps aux"
-alias psg="ps aux | grep"
-
-# Package Management
-alias update="sudo apt update && sudo apt upgrade -y"
-alias install="sudo apt install"
-alias remove="sudo apt remove"
-alias search="apt search"
-alias autoremove="sudo apt autoremove -y"
-
-# Docker Aliases
-alias d="docker"
-alias dc="docker compose"
-alias dps="docker ps"
-alias dpsa="docker ps -a"
-alias di="docker images"
-alias dcu="docker compose up -d"
-alias dcd="docker compose down"
-alias dcl="docker compose logs -f"
-alias dex="docker exec -it"
-alias drm="docker rm"
-alias drmi="docker rmi"
-alias dprune="docker system prune -af"
-
-# Git Aliases
-alias g="git"
-alias gs="git status"
-alias gst="git status"
-alias ga="git add"
-alias gaa="git add --all"
-alias gc="git commit"
-alias gcm="git commit -m"
-alias gca="git commit -a"
-alias gcam="git commit -am"
-alias gp="git pull"
-alias gP="git push"
-alias gpo="git push origin"
-alias gl="git log --oneline --graph --decorate"
-alias gd="git diff"
-alias gb="git branch"
-alias gco="git checkout"
-alias gcb="git checkout -b"
-
-# WSL2 Helper Functions
-function explorer
-    if test (count $argv) -gt 0
-        explorer.exe (wslpath -w "$argv[1]")
-    else
-        explorer.exe (wslpath -w ".")
-    end
-end
-
-function cmd
-    cmd.exe /c "$argv"
-end
-
-function powershell
-    powershell.exe -Command "$argv"
-end
-
-function wslperf
-    echo "=== WSL Performance ==="
-    echo "Memory: "(free -h | grep '^Mem:' | awk '{print $3"/"$2}')
-    echo "CPU: "(top -bn1 | grep 'Cpu(s):' | awk '{print $2}' | cut -d'%' -f1)"%"
-    echo "Disk: "(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')
-end
-
-function mkcd
-    mkdir -p "$argv[1]"; and cd "$argv[1]"
-end
-
-# Interactive starship prompt
-if status is-interactive
-    if command -v starship >/dev/null 2>&1
-        starship init fish | source
-    end
-end
-FISH_EOF
-        chmod 644 "$user_home/.config/fish/config.fish"
-
-        # Configure hybrid auto-switch in ~/.bashrc
-        local bashrc="$user_home/.bashrc"
-        touch "$bashrc"
-        if ! grep -q "exec fish" "$bashrc"; then
-            cat >> "$bashrc" <<'BASH_FISH_EOF'
-
-# Auto-switch to Fish for interactive sessions only
-# Non-interactive SSH commands, cron, scp/rsync stay in standard Bash
-if [[ $- == *i* ]] && [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && command -v fish >/dev/null 2>&1; then
-    exec fish
-fi
-BASH_FISH_EOF
-        fi
-
-        chown -R "$username:$username" "$user_home/.config" "$bashrc" 2>/dev/null || true
     }
 
     # Ensure fish is available before setup
@@ -2042,269 +2442,17 @@ log "Configuring modern Bash setup..."
 # Ensure bash-completion is installed
 common_safe_install bash-completion || warn "bash-completion was not installed"
 
-# Function to setup modern Bash for a user
 setup_bash_for_user() {
     local username=$1
     local user_home
     user_home=$(common_user_home "$username" || echo "/home/$username")
-    
-    log "Setting up modern Bash configuration for user: $username"
-    
-    # Backup existing .bashrc if it exists and is not our version
-    if [ -f "$user_home/.bashrc" ] && ! grep -q "WSL2 Optimized Bash Configuration" "$user_home/.bashrc"; then
-        cp "$user_home/.bashrc" "$user_home/.bashrc.backup.$(date +%Y%m%d_%H%M%S)" 2>/dev/null || true
-        log "Backed up existing .bashrc for $username"
-    fi
-    
-    # Create modern .bashrc with WSL2 optimizations
-    cat > "$user_home/.bashrc" <<'BASHRC'
-# WSL2 Optimized Bash Configuration
 
-# Auto-switch to Fish for interactive sessions only
-# Non-interactive SSH commands, cron, scp/rsync stay in standard Bash
-if [[ $- == *i* ]] && [ -z "${SSH_ORIGINAL_COMMAND:-}" ] && command -v fish >/dev/null 2>&1; then
-    exec fish
-fi
-
-# ============================================
-# Shell Options
-# ============================================
-
-# History configuration
-HISTSIZE=50000
-HISTFILESIZE=100000
-HISTCONTROL=ignoreboth:erasedups
-HISTTIMEFORMAT="%F %T "
-shopt -s histappend
-
-# Navigation and behavior
-shopt -s autocd           # cd to directory just by typing its name
-shopt -s cdspell          # autocorrect typos in path names when using cd
-shopt -s dirspell         # autocorrect typos in directory names during completion
-shopt -s globstar         # ** recursive glob
-shopt -s checkwinsize     # update LINES and COLUMNS after each command
-shopt -s nocaseglob       # case-insensitive globbing
-
-# Completion options
-shopt -s no_empty_cmd_completion
-
-# ============================================
-# Bash Completion
-# ============================================
-
-if [ -f /usr/share/bash-completion/bash_completion ]; then
-    . /usr/share/bash-completion/bash_completion
-elif [ -f /etc/bash_completion ]; then
-    . /etc/bash_completion
-fi
-
-# ============================================
-# Environment Variables
-# ============================================
-
-# WSL2-specific environment variables
-export EDITOR='code'
-export VISUAL='code'
-export BROWSER="/mnt/c/Windows/System32/cmd.exe /c start"
-export DISPLAY=":0"
-
-# Path optimization for WSL
-export PATH="/usr/local/bin:/usr/bin:$PATH"
-
-# ============================================
-# Prompt Configuration
-# ============================================
-
-# Colors for prompt
-if [ -x /usr/bin/tput ] && tput setaf 1 >&/dev/null; then
-    # We have color support
-    PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+    log "Setting up Bash configuration for $username"
+    if common_setup_bashrc "$username" "$user_home" wsl2; then
+    log "Bash configuration written for $username"
 else
-    PS1='\u@\h:\w\$ '
+    warn "Bash configuration failed for $username"
 fi
-
-# If Starship is installed, use it
-if command -v starship >/dev/null 2>&1; then
-    eval "$(starship init bash)"
-fi
-
-# ============================================
-# Docker Aliases
-# ============================================
-
-alias d='docker'
-alias dc='docker compose'
-alias dps='docker ps'
-alias dpsa='docker ps -a'
-alias di='docker images'
-alias dcu='docker compose up -d'
-alias dcd='docker compose down'
-alias dcl='docker compose logs -f'
-alias dex='docker exec -it'
-alias drm='docker rm'
-alias drmi='docker rmi'
-alias dprune='docker system prune -af'
-
-# ============================================
-# Git Aliases
-# ============================================
-
-alias g='git'
-alias gs='git status'
-alias gst='git status'
-alias ga='git add'
-alias gaa='git add --all'
-alias gc='git commit'
-alias gcm='git commit -m'
-alias gca='git commit -a'
-alias gcam='git commit -am'
-alias gp='git pull'
-alias gP='git push'
-alias gpo='git push origin'
-alias gl='git log --oneline --graph --decorate'
-alias gd='git diff'
-alias gb='git branch'
-alias gco='git checkout'
-alias gcb='git checkout -b'
-
-# ============================================
-# System Aliases
-# ============================================
-
-alias ll='ls -alFh'
-alias la='ls -A'
-alias l='ls -CF'
-alias cls='clear'
-alias c='clear'
-alias h='history'
-alias ..='cd ..'
-alias ...='cd ../..'
-alias ....='cd ../../..'
-alias .....='cd ../../../..'
-
-# System monitoring
-alias meminfo='free -h'
-alias cpuinfo='lscpu'
-alias diskinfo='df -h'
-alias ports='netstat -tulanp'
-alias psa='ps aux'
-alias psg='ps aux | grep'
-
-# Package management
-alias update='sudo apt update && sudo apt upgrade -y'
-alias install='sudo apt install'
-alias remove='sudo apt remove'
-alias search='apt search'
-alias autoremove='sudo apt autoremove -y'
-
-# Safety aliases
-alias rm='rm -i'
-alias cp='cp -i'
-alias mv='mv -i'
-alias mkdir='mkdir -pv'
-
-# ============================================
-# WSL2-specific Functions
-# ============================================
-
-explorer() {
-    if [ -z "$1" ]; then
-        explorer.exe .
-    else
-        explorer.exe "$(wslpath -w "$1")"
-    fi
-}
-
-cmd() {
-    cmd.exe /c "$*"
-}
-
-powershell() {
-    powershell.exe -Command "$*"
-}
-
-wslperf() {
-    echo "=== WSL Performance ==="
-    echo "Memory: $(free -h | grep '^Mem:' | awk '{print $3"/"$2}')"
-    echo "CPU: $(top -bn1 | grep 'Cpu(s):' | awk '{print $2}' | cut -d'%' -f1)%"
-    echo "Disk: $(df -h / | tail -1 | awk '{print $3"/"$2" ("$5")"}')"
-}
-
-# ============================================
-# Useful Functions
-# ============================================
-
-mkcd() {
-    mkdir -p "$1" && cd "$1"
-}
-
-extract() {
-    if [ -f "$1" ]; then
-        case "$1" in
-            *.tar.bz2)   tar xjf "$1"     ;;
-            *.tar.gz)    tar xzf "$1"     ;;
-            *.bz2)       bunzip2 "$1"     ;;
-            *.rar)       unrar e "$1"     ;;
-            *.gz)        gunzip "$1"      ;;
-            *.tar)       tar xf "$1"      ;;
-            *.tbz2)      tar xjf "$1"     ;;
-            *.tgz)       tar xzf "$1"     ;;
-            *.zip)       unzip "$1"       ;;
-            *.Z)         uncompress "$1"  ;;
-            *.7z)        7z x "$1"        ;;
-            *)           echo "'$1' cannot be extracted via extract()" ;;
-        esac
-    else
-        echo "'$1' is not a valid file"
-    fi
-}
-
-# ============================================
-# fnm (Fast Node Manager)
-# ============================================
-
-export FNM_PATH="$HOME/.local/share/fnm"
-export PATH="$FNM_PATH:$PATH"
-export XDG_RUNTIME_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/fnm-runtime"
-mkdir -p "$XDG_RUNTIME_DIR"
-if command -v fnm >/dev/null 2>&1; then
-    eval "$(fnm env --use-on-cd --shell bash)"
-fi
-
-# ============================================
-# Additional Settings
-# ============================================
-
-# Enable color support for ls and grep
-if [ -x /usr/bin/dircolors ]; then
-    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
-    alias ls='ls --color=auto'
-    alias grep='grep --color=auto'
-    alias fgrep='fgrep --color=auto'
-    alias egrep='egrep --color=auto'
-fi
-
-# Improved less
-export LESS='-R -F -X'
-export LESSOPEN='| /usr/bin/lesspipe %s 2>&-'
-
-# ============================================
-# Welcome Message (optional)
-# ============================================
-
-# Uncomment to show system info on login
-# if [ -t 0 ]; then
-#     echo "Welcome to WSL2 - $(lsb_release -d | cut -f2)"
-#     echo "$(uname -r)"
-# fi
-BASHRC
-
-    # Set proper ownership
-    if [ "$username" != "root" ]; then
-        chown "$username":"$username" "$user_home/.bashrc" 2>/dev/null || true
-    fi
-    
-    log "✓ Modern Bash configuration created for $username"
 }
 
 # Setup Bash for root
