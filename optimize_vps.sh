@@ -11,6 +11,7 @@ export LANG=C
 ################################################################################
 
 set -e
+SCRIPT_VERSION="3.0.0"
 
 # Colors for output
 RED='\033[0;31m'
@@ -2042,6 +2043,7 @@ SSH, firewall, sysctl). Guide: https://github.com/snaplyze/optimize-debian/blob/
 Options:
   -h, --help    Show this help and exit without changing anything
 USAGE
+    printf '\nVersion: %s\n' "$SCRIPT_VERSION"
 }
 
 # Every step runs from optimize_main, called on the last line: bash reads a whole function before
@@ -2832,7 +2834,7 @@ if [ "$distro_version" = "12" ]; then
     fi
     BACKPORTS_KERNEL_INSTALLED=true
 else
-    info "Debian $distro_version includes modern kernel by default ($KERNEL_VERSION)"
+    info "Debian $distro_version includes a modern kernel by default"
     progress "Ensuring latest official Debian kernel ($KERNEL_PKG, $HEADERS_PKG)..."
     if ! common_safe_install "$KERNEL_PKG" "$HEADERS_PKG"; then
         error "Official Debian kernel ($KERNEL_PKG, $HEADERS_PKG) was not installed"

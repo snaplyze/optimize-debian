@@ -199,6 +199,7 @@ test_parse_args_rejects_invalid_input() {
         run_status parse_args --help
         assert_rc 0 "--help must succeed"
         assert_out "Usage:" "--help must print usage"
+        assert_out "Version: $SCRIPT_VERSION" "--help must print the version"
         assert_out "--user <name>" "usage must document --user"
         assert_no_out "snaplyze" "usage must not hard-code a personal default user"
     '

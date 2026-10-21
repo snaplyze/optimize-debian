@@ -71,6 +71,7 @@ parse_args() {
         echo "Использование: sudo $0 [--yes] [--allow-two-hop-no-reboot]"
         echo "  --yes, -y                    Без интерактивных подтверждений"
         echo "  --allow-two-hop-no-reboot    Разрешить --yes продолжить Debian 11→12→13 без промежуточного ребута"
+        echo "Версия: ${SCRIPT_VERSION}"
         exit 0
         ;;
       *)

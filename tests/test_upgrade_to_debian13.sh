@@ -103,6 +103,15 @@ test_arg_parsing_keeps_two_hop_reboot_guard() {
     '
 }
 
+test_help_prints_version() {
+    local output version
+
+    version="$(sed -n 's/^readonly SCRIPT_VERSION="\(.*\)"$/\1/p' "$ROOT_DIR/upgrade-to-debian13.sh")"
+    [ -n "$version" ] || fail "upgrade-to-debian13.sh must set SCRIPT_VERSION"
+    output="$(bash "$ROOT_DIR/upgrade-to-debian13.sh" --help </dev/null 2>&1)" || fail "--help must exit 0: $output"
+    grep -Fqx "Версия: $version" <<<"$output" || fail "--help must print version $version: $output"
+}
+
 test_two_hop_no_reboot_requires_explicit_flag_in_auto_mode() {
     SCRIPT_ROOT="$ROOT_DIR" bash -c '
         set -euo pipefail
@@ -920,6 +929,7 @@ main() {
     test_source_does_not_execute_main
     test_is_remote_session_detection
     test_arg_parsing_keeps_two_hop_reboot_guard
+    test_help_prints_version
     test_two_hop_no_reboot_requires_explicit_flag_in_auto_mode
     test_ssh_health_skips_inactive_local_ssh_service
     test_disk_space_checks_separate_mountpoints

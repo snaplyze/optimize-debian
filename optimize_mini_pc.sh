@@ -8,10 +8,10 @@ export LANG=C
 # Mini PC Optimization Script (Intel N5095/Jasper Lake Focus)
 # Purpose: Complete optimization for Home Server / Media Server on Debian 12/13
 # Hardware Focus: Intel Celeron N5095 (Jasper Lake), Debian Backports kernel, Fish + Starship, SSD/NVMe, Intel UHD GPU
-# Version: 1.0.0 (Hybrid VPS+WSL2 features)
 ################################################################################
 
 set -e
+SCRIPT_VERSION="2.0.0"
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_PATH="$(readlink -f "$SCRIPT_SOURCE" 2>/dev/null || printf '%s' "$SCRIPT_SOURCE")"
 SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
@@ -2313,6 +2313,7 @@ SSH, firewall, Samba, sysctl). Guide: https://github.com/snaplyze/optimize-debia
 Options:
   -h, --help    Show this help and exit without changing anything
 USAGE
+    printf '\nVersion: %s\n' "$SCRIPT_VERSION"
 }
 
 # Every step runs from optimize_main, called on the last line: bash reads a whole function before
