@@ -1852,6 +1852,162 @@ render_wsl_conf() {
     common_render_wsl_conf "${1:-}"
 }
 
+# The paths are variables so that tests can point them at a temporary tree.
+WSL_CONF_FILE="/etc/wsl.conf"
+SSH_AGENT_PROFILE_FILE="/etc/profile.d/wsl2-ssh-agent.sh"
+
+# Copies WSL_CONF_FILE with the time in the name: a second run on the same day keeps the copy
+# of the original file instead of overwriting it with what the first run wrote.
+backup_wsl_conf() {
+    local backup
+
+    [ -f "$WSL_CONF_FILE" ] || return 0
+    backup="${WSL_CONF_FILE}.backup.$(date +%F-%H%M%S)"
+    if cp -p "$WSL_CONF_FILE" "$backup"; then
+        log "Backed up ${WSL_CONF_FILE} to ${backup}"
+    else
+        warn "Could not back up ${WSL_CONF_FILE} to ${backup}"
+    fi
+}
+
+# The block earlier versions appended to ~/.bash_profile, ~/.profile and ~/.zprofile of the
+# target user. A login bash that finds ~/.bash_profile skips ~/.profile and ~/.bashrc, so the
+# block took the Fish switch and the aliases away; it is removed by configure_ssh_agent_autostart.
+# shellcheck disable=SC2016
+LEGACY_SSH_AGENT_BLOCK='# WSL2: автозапуск ssh-agent (без systemd)
+if ! pgrep -u "$USER" ssh-agent >/dev/null 2>&1; then
+  eval "$(ssh-agent -s)" >/dev/null
+fi'
+
+# Writes SSH_AGENT_PROFILE_FILE (mode 644, through a temporary file in the same directory).
+# /etc/profile of every login shell reads it before ~/.profile, so bash and the Fish that
+# ~/.bashrc switches to share one agent per user. The socket lives in XDG_RUNTIME_DIR or
+# /tmp/ssh-agent-<uid>, not in ~/.ssh: on WSL that is often a link to DrvFS, where a unix
+# socket cannot be bound. Returns 1 when the file was already up to date.
+write_ssh_agent_profile() {
+    local dir tmp
+
+    dir="$(dirname "$SSH_AGENT_PROFILE_FILE")"
+    mkdir -p "$dir"
+    tmp="$(mktemp "$dir/.$(basename "$SSH_AGENT_PROFILE_FILE").XXXXXX")"
+    cat > "$tmp" <<'EOF'
+# Written by optimize_wsl2.sh: gives every login shell of a user one ssh-agent on a socket in
+# XDG_RUNTIME_DIR (or ssh-agent-<uid> in TMPDIR or /tmp) through SSH_AUTH_SOCK, unless one is set.
+# POSIX sh, silent, safe for a shell that runs with set -e.
+if [ -z "${SSH_AUTH_SOCK:-}" ] && command -v ssh-agent >/dev/null 2>&1 && command -v ssh-add >/dev/null 2>&1; then
+    _wsl2_agent_dir="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}/ssh-agent-$(id -u)}"
+    [ -e "$_wsl2_agent_dir" ] || mkdir -m 700 "$_wsl2_agent_dir" 2>/dev/null || true
+    # Only a directory of the user, not a link; the fallback must also be mode 700.
+    _wsl2_agent_ok=0
+    if [ -d "$_wsl2_agent_dir" ] && [ ! -L "$_wsl2_agent_dir" ] &&
+        [ "$(stat -c %u "$_wsl2_agent_dir" 2>/dev/null)" = "$(id -u)" ]; then
+        if [ -n "${XDG_RUNTIME_DIR:-}" ] || [ "$(stat -c %a "$_wsl2_agent_dir" 2>/dev/null)" = 700 ]; then
+            _wsl2_agent_ok=1
+        fi
+    fi
+    if [ "$_wsl2_agent_ok" = 1 ]; then
+        SSH_AUTH_SOCK="$_wsl2_agent_dir/ssh-agent.sock"
+        export SSH_AUTH_SOCK
+        # ssh-add exits 2 when no agent answers on the socket; 0 and 1 mean a live agent.
+        _wsl2_agent_rc=0
+        ssh-add -l >/dev/null 2>&1 || _wsl2_agent_rc=$?
+        if [ "$_wsl2_agent_rc" -eq 2 ]; then
+            rm -f "$SSH_AUTH_SOCK"
+            ssh-agent -a "$SSH_AUTH_SOCK" >/dev/null 2>&1 || unset SSH_AUTH_SOCK
+        fi
+    fi
+    unset _wsl2_agent_dir _wsl2_agent_ok _wsl2_agent_rc
+fi
+EOF
+    chmod 644 "$tmp"
+    if cmp -s "$tmp" "$SSH_AGENT_PROFILE_FILE" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv -f "$tmp" "$SSH_AGENT_PROFILE_FILE"
+}
+
+# Removes every exact copy of LEGACY_SSH_AGENT_BLOCK, with the empty line that followed it,
+# from the file $1. The rest of the content, the owner and the mode stay as they are.
+# A symbolic link is left alone with a warning: root must not write through a link the user
+# can point elsewhere. Returns 1 when the file does not exist or has no block.
+remove_legacy_ssh_agent_block() {
+    local file="$1"
+    local -a block lines kept
+    local i j n removed=0 match
+
+    if [ -L "$file" ]; then
+        warn "${file} is a symbolic link; it was not checked for the ssh-agent block of earlier versions"
+        return 1
+    fi
+    [ -f "$file" ] || return 1
+    mapfile -t block <<<"$LEGACY_SSH_AGENT_BLOCK"
+    grep -Fqx -- "${block[0]}" "$file" || return 1
+    mapfile -t lines < "$file"
+    n=${#lines[@]}
+    kept=()
+    i=0
+    while [ "$i" -lt "$n" ]; do
+        match=1
+        for j in "${!block[@]}"; do
+            if [ $((i + j)) -ge "$n" ] || [ "${lines[i + j]}" != "${block[j]}" ]; then
+                match=0
+                break
+            fi
+        done
+        if [ "$match" -eq 1 ]; then
+            i=$((i + ${#block[@]}))
+            if [ "$i" -lt "$n" ] && [ -z "${lines[i]}" ]; then
+                i=$((i + 1))
+            fi
+            removed=1
+            continue
+        fi
+        kept+=("${lines[i]}")
+        i=$((i + 1))
+    done
+    [ "$removed" -eq 1 ] || return 1
+    if [ "${#kept[@]}" -gt 0 ]; then
+        printf '%s\n' "${kept[@]}" > "$file"
+    else
+        : > "$file"
+    fi
+}
+
+# Step 10: the profile.d snippet for every user and the cleanup of the block earlier versions
+# left in the login files of DOCKER_USER. ~/.bash_profile and ~/.zprofile that held nothing
+# but the block were created by those versions and are removed; ~/.profile always stays. A file
+# those versions created as root in the home of another user gets the owner of the home back.
+configure_ssh_agent_autostart() {
+    local home login_file file
+
+    if write_ssh_agent_profile; then
+        log "ssh-agent autostart written to ${SSH_AGENT_PROFILE_FILE}"
+    else
+        log "ssh-agent autostart in ${SSH_AGENT_PROFILE_FILE} is up to date"
+    fi
+
+    home="$(common_user_home "$DOCKER_USER" || true)"
+    if [ -z "$home" ]; then
+        warn "Home directory of ${DOCKER_USER} not found; the login files were not checked for the ssh-agent block of earlier versions"
+        return 0
+    fi
+    for login_file in .bash_profile .profile .zprofile; do
+        file="$home/$login_file"
+        remove_legacy_ssh_agent_block "$file" || continue
+        log "Removed the ssh-agent block of earlier versions from ${file}"
+        if [ "$login_file" != .profile ] && ! grep -q '[^[:space:]]' "$file"; then
+            rm -f "$file"
+            log "Removed ${file}: earlier versions created it for that block only"
+            continue
+        fi
+        if [ "$(stat -c %u "$file")" = 0 ] && [ "$(stat -c %u "$home")" != 0 ]; then
+            chown --reference="$home" "$file"
+            log "Gave ${file} the owner of ${home}: earlier versions created it as root"
+        fi
+    done
+}
+
 print_usage() {
     cat <<'USAGE'
 Usage: sudo bash optimize_wsl2.sh
@@ -1908,10 +2064,6 @@ service_actions_available() {
 note_post_restart() {
     local message="$1"
     POST_RESTART_NOTES+=("$message")
-}
-
-has_user_systemd() {
-    systemctl --user show-environment >/dev/null 2>&1
 }
 
 # Check if running as root
@@ -2084,10 +2236,7 @@ section "${SYMBOL_GEAR} WSL2 Configuration"
 if $CONFIGURE_WSL_CONF; then
     progress "Creating optimized /etc/wsl.conf..."
 
-    # Backup existing wsl.conf
-    if [ -f /etc/wsl.conf ]; then
-        cp /etc/wsl.conf "/etc/wsl.conf.backup.$(date +%F)" || true
-    fi
+    backup_wsl_conf
 
     # Create optimized wsl.conf. Do not write an empty [user] default because
     # WSL expects this key to contain a real Linux user name.
@@ -2735,28 +2884,7 @@ if $CONFIGURE_SSH_AGENT; then
     # Install openssh-client with availability check
     common_safe_install openssh-client || warn "openssh-client was not installed"
 
-    if has_user_systemd; then
-        log "Enabling ssh-agent.socket via systemd..."
-        systemctl --user enable --now ssh-agent.socket || warn "Failed to enable ssh-agent.socket"
-    else
-        log "Configuring ssh-agent via profile..."
-
-        # write literal $USER for runtime expansion in user shell
-        # shellcheck disable=SC2016
-        PROFILE_SNIPPET='# WSL2: автозапуск ssh-agent (без systemd)
-if ! pgrep -u "$USER" ssh-agent >/dev/null 2>&1; then
-  eval "$(ssh-agent -s)" >/dev/null
-fi
-'
-
-        for f in "/home/$DOCKER_USER/.bash_profile" "/home/$DOCKER_USER/.profile" "/home/$DOCKER_USER/.zprofile"; do
-            [ -f "$f" ] || touch "$f"
-            if ! grep -F "WSL2: автозапуск ssh-agent" "$f" >/dev/null 2>&1; then
-                printf "%b\n" "$PROFILE_SNIPPET" >>"$f"
-                log "Added ssh-agent autostart to ${f##*/}"
-            fi
-        done
-    fi
+    configure_ssh_agent_autostart
 
     log "SSH agent configuration completed"
 else
