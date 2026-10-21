@@ -1,6 +1,6 @@
 # План
 
-Трекер: https://github.com/snaplyze/optimize-debian/issues; сверено 2026-10-21T04:01Z
+Трекер: https://github.com/snaplyze/optimize-debian/issues; сверено 2026-10-21T06:46Z
 
 План — единый реестр задач и запись хода. Задачи и вехи трекера — его копия и вход для новых задач: у открытой задачи плана есть issue с ID в названии, вехой этапа и ссылкой на раздел задачи. Сначала обновляется план, затем трекер.
 
@@ -9,7 +9,7 @@
 ## Этапы
 
 1. Аудит 2026-10-20 — [веха](https://github.com/snaplyze/optimize-debian/milestone/1), выполнен 2026-10-21: все задачи DONE.
-2. Оформление и документация 2026-10-21 — [веха](https://github.com/snaplyze/optimize-debian/milestone/2), все открытые задачи; порядок — [очередь этапа](#очередь-этапа).
+2. Оформление и документация 2026-10-21 — [веха](https://github.com/snaplyze/optimize-debian/milestone/2), выполнен 2026-10-21 (PR #72): все задачи DONE; [очередь этапа](#очередь-этапа).
 
 ## Аудит 2026-10-20
 
@@ -539,7 +539,7 @@
 - Границы: новые файлы в корне и `.github/`, ссылки на Discussions в документах, настройки репозитория (описание, темы, вики, private vulnerability reporting).
 - Результат: у репозитория есть лицензия, политика безопасности и правила участия.
 - Приемка: `community/profile` — все пункты заполнены; GitHub определяет лицензию MIT (`licenseInfo`); `private-vulnerability-reporting` — `enabled`; ссылок на Discussions в документах нет.
-- Ход: выполнено 2026-10-21 — `LICENSE` (дословный текст MIT, правообладатель snaplyze, 2026), `SECURITY.md` (поддерживаемые версии: `main` и последний выпуск; сообщение только через https://github.com/snaplyze/optimize-debian/security/advisories/new; что приложить и что вычистить из логов; область), `CONTRIBUTING.md` (по AGENTS.md: issue, окружение, запуск только на одноразовой Debian, полная проверка, копии `lib/`, стиль, коммиты, PR, CI и форки, выпуски), `CODE_OF_CONDUCT.md` (официальный русский перевод Contributor Covenant 2.1; контакт — Report content и закрытая форма, без почты), формы issue «Ошибка» и «Предложение» (пустые issue выключены, ссылки на форму уязвимости и на документацию), шаблон PR по AGENTS.md, `.editorconfig`, `.gitattributes` (`*.yml`, `*.svg` — LF, `*.png` — binary). Настройки GitHub: описание на русском, 18 тем, вики выключена (была пустой), private vulnerability reporting — `{"enabled":true}`, удаление веток после слияния включено, кнопка merge commit выключена (ruleset и так требует линейную историю); Discussions не включались, ссылки на них убраны из README и руководств. Проверка: формы разобраны PyYAML и сверены со схемой issue forms; ревью — `CONTRIBUTING.md` описывал прежнюю проверку пробелов в CI, в форме не было окружения «Хост AmneziaVPN» — исправлено. Профиль сообщества и распознавание лицензии GitHub проверяются после слияния — запись ниже.
+- Ход: выполнено 2026-10-21 — `LICENSE` (дословный текст MIT, правообладатель snaplyze, 2026), `SECURITY.md` (поддерживаемые версии: `main` и последний выпуск; сообщение только через https://github.com/snaplyze/optimize-debian/security/advisories/new; что приложить и что вычистить из логов; область), `CONTRIBUTING.md` (по AGENTS.md: issue, окружение, запуск только на одноразовой Debian, полная проверка, копии `lib/`, стиль, коммиты, PR, CI и форки, выпуски), `CODE_OF_CONDUCT.md` (официальный русский перевод Contributor Covenant 2.1; контакт — Report content и закрытая форма, без почты), формы issue «Ошибка» и «Предложение» (пустые issue выключены, ссылки на форму уязвимости и на документацию), шаблон PR по AGENTS.md, `.editorconfig`, `.gitattributes` (`*.yml`, `*.svg` — LF, `*.png` — binary). Настройки GitHub: описание на русском, 18 тем, вики выключена (была пустой), private vulnerability reporting — `{"enabled":true}`, удаление веток после слияния включено, кнопка merge commit выключена (ruleset и так требует линейную историю); Discussions не включались, ссылки на них убраны из README и руководств. Проверка: формы разобраны PyYAML и сверены со схемой issue forms; ревью — `CONTRIBUTING.md` описывал прежнюю проверку пробелов в CI, в форме не было окружения «Хост AmneziaVPN» — исправлено. После слияния (PR #72): `community/profile` — `health_percentage` 100, `license`, `code_of_conduct`, `contributing`, `pull_request_template` заполнены (поле `issue_template` API показывает только шаблоны Markdown, а формы YAML GitHub показывает с предпросмотром без ошибок, `contactLinks` из `config.yml` читаются); `licenseInfo` — `mit`.
 
 #### CI-2
 
