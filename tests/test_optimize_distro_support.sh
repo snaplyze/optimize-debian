@@ -288,6 +288,13 @@ test_forbidden_patterns_hygiene() {
             fail "$script has a curl call without --max-time"
         fi
     done
+    # ARCH-5: the shell configs of the vps, mini and wsl2 profiles come from lib/common.sh only.
+    for script in optimize_vps.sh optimize_mini_pc.sh optimize_wsl2.sh; do
+        # (Go and fnm still append their own blocks to .bashrc with cat >>.)
+        if grep -nE '(cat > |tee )"[^"]*(\.bashrc|config\.fish)"' "$ROOT_DIR/$script"; then
+            fail "$script must write .bashrc and config.fish through common_setup_bashrc / common_setup_fish"
+        fi
+    done
     if grep -RE 'eval echo "~' "$ROOT_DIR"/*.sh "$ROOT_DIR"/lib/*.sh; then
         fail 'scripts must not use eval echo "~" for home expansion; use common_user_home'
     fi
@@ -300,22 +307,22 @@ test_generated_fish_config_templates_parse() {
         return 0
     fi
 
-    local tmp_dir
+    local tmp_dir script=optimize_amnezia_host.sh
     tmp_dir=$(mktemp -d)
     trap 'rm -rf "$tmp_dir"' RETURN
 
-    for script in "${SCRIPTS[@]}"; do
-        awk '
-            /config\.fish.*<<.*FISH/ { inside=1; next }
-            inside && /^FISH.*EOF$/ { inside=0; exit }
-            inside { print }
-        ' "$ROOT_DIR/$script" > "$tmp_dir/$script.fish"
+    # The vps, mini and wsl2 configs come from common_render_fish_config (tests/test_shell_config.sh);
+    # Amnezia keeps its own template.
+    awk '
+        /config\.fish.*<<.*FISH/ { inside=1; next }
+        inside && /^FISH.*EOF$/ { inside=0; exit }
+        inside { print }
+    ' "$ROOT_DIR/$script" > "$tmp_dir/$script.fish"
 
-        [ -s "$tmp_dir/$script.fish" ] || \
-            fail "$script should contain a generated config.fish template"
-        fish -n "$tmp_dir/$script.fish" || \
-            fail "$script generated config.fish template should parse as fish"
-    done
+    [ -s "$tmp_dir/$script.fish" ] || \
+        fail "$script should contain a generated config.fish template"
+    fish -n "$tmp_dir/$script.fish" || \
+        fail "$script generated config.fish template should parse as fish"
 
     rm -rf "$tmp_dir"
     trap - RETURN
