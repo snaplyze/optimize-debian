@@ -89,7 +89,7 @@ wsl --set-default-version 2
 
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh)
 
 # Или скачайте скрипт
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh

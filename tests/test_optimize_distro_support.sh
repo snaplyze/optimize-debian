@@ -278,7 +278,10 @@ test_forbidden_patterns_hygiene() {
             fail "$script must create temporary files with mktemp, not fixed /tmp paths"
         fi
         if awk '
-            # Joins continued lines, then checks every curl command for --max-time.
+            # Joins continued lines, then checks every curl command for --max-time; the usage
+            # text, which shows the run command, is not a command.
+            /<<.USAGE.$/ { usage = 1; next }
+            usage { if ($0 == "USAGE") usage = 0; next }
             /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
             { line = buf $0; buf = "" }
             line ~ /^[[:space:]]*#/ { next }

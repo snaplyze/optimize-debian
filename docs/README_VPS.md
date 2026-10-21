@@ -54,7 +54,7 @@
 ### Быстрый запуск
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
 
 # Или скачайте и запустите
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh

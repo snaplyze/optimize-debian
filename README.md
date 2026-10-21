@@ -139,10 +139,12 @@
 
 ## 🚀 Быстрый старт
 
+`curl -fsSL` останавливается на ошибке HTTP, а шаги `optimize_vps.sh`, `optimize_mini_pc.sh` и `optimize_wsl2.sh` начинаются только после того, как скрипт загружен целиком: оборванная загрузка ничего не меняет. `bash <скрипт> --help` печатает справку без root и без изменений.
+
 ### Для VPS:
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
 
 # Или скачайте и запустите
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh
@@ -158,7 +160,7 @@ sudo ./optimize_vps.sh
 OPERATOR=ops
 
 # Быстрый запуск (bash + curl, под root)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user "$OPERATOR" --yes
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user "$OPERATOR" --yes
 
 # Или скачайте и запустите минимальный host baseline
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh
@@ -184,7 +186,7 @@ sudo ./optimize_amnezia_host.sh --firewall-phase locked --yes
 ### Для Mini PC:
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh)
 
 # Или скачайте и запустите
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh
@@ -201,7 +203,7 @@ wsl --update
 wsl --set-default-version 2
 
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh)
 
 # Или скачайте и запустите в WSL2
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh
@@ -212,7 +214,7 @@ sudo ./optimize_wsl2.sh
 ### Для обновления Debian 11/12 → 13:
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh)
 
 # Или скачайте и запустите интерактивный апгрейд
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh

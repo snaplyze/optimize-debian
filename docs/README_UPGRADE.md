@@ -34,7 +34,7 @@
 
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh)
 
 # Или скачивание
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh

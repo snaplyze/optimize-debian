@@ -83,7 +83,7 @@ OPERATOR=ops
 ### Быстрый запуск (bash + curl, под root)
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user "$OPERATOR" --yes
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh) --user "$OPERATOR" --yes
 ```
 
 ### Рекомендуемый режим: host baseline + Docker CE

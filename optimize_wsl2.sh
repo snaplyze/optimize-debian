@@ -1846,12 +1846,40 @@ render_wsl_conf() {
     common_render_wsl_conf "${1:-}"
 }
 
-if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
-    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
-        return 0
-    fi
-    exit 0
-fi
+print_usage() {
+    cat <<'USAGE'
+Usage: sudo bash optimize_wsl2.sh
+       bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh)
+
+WSL2 setup for Debian 12 and 13: systemd, Fish + Starship, Docker, NVIDIA Container Toolkit,
+CUDA, Go and Node.js (fnm). It asks for the components and the user interactively.
+Run it as root in the WSL2 distribution: it changes the system (packages, users, sudoers,
+/etc/wsl.conf, sysctl). Guide: https://github.com/snaplyze/optimize-debian/blob/main/docs/README_WSL2.md
+
+Options:
+  -h, --help    Show this help and exit without changing anything
+USAGE
+}
+
+# Every step runs from optimize_main, called on the last line: bash reads a whole function before
+# running it, so a download cut short (bash <(curl ...)) stops with a syntax error before any
+# change. The body keeps the column it had at the top level, so the heredocs it writes stay as
+# they are.
+optimize_main() {
+case "${1:-}" in
+    -h|--help)
+        print_usage
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        printf 'Unknown argument: %s\n\n' "$1" >&2
+        print_usage >&2
+        exit 2
+        ;;
+esac
+
 
 # WSL2 detection functions
 is_wsl() {
@@ -3632,3 +3660,12 @@ if [ -n "$FETCH_CMD" ]; then
 else
     info "System info tool not installed (fastfetch/neofetch unavailable for this release)"
 fi
+}
+
+if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
+    if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+        return 0
+    fi
+    exit 0
+fi
+optimize_main "$@"
