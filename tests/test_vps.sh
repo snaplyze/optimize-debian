@@ -308,8 +308,11 @@ test_ssh_hardening_effective_values() {
         printf "AllowTcpForwarding no\nMaxSessions 4\nUsePAM yes\n" > "$T/sshd_config.d/10-local.conf"
         run_status configure_ssh_hardening ops
         assert_rc 0 "hardening next to an operator drop-in"
-        sshd_effective | grep -Fxq "allowtcpforwarding no" || die "the operator AllowTcpForwarding must stay"
-        sshd_effective | grep -Fxq "maxsessions 4" || die "the operator MaxSessions must stay"
+        # Not piped into grep -q: grep stops at the first match, the emulator writes on and gets
+        # SIGPIPE, and pipefail fails the check now and then.
+        effective="$(sshd_effective)"
+        grep -Fxq "allowtcpforwarding no" <<<"$effective" || die "the operator AllowTcpForwarding must stay"
+        grep -Fxq "maxsessions 4" <<<"$effective" || die "the operator MaxSessions must stay"
 
         # A drop-in read first wins: the step fails, ours goes, sshd is not restarted.
         reset_ssh_case
