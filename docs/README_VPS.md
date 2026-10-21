@@ -487,7 +487,7 @@ sshd берет первое прочитанное значение парам�
 ### Ручное обновление
 ```bash
 # Обновить скрипт
-wget -O optimize_vps.sh https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh
 
 # Проверить систему
 vps-monitor.sh

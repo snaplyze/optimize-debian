@@ -464,7 +464,7 @@ default=snaplyze
 ### Ручное обновление
 ```bash
 # Обновить скрипт
-wget -O optimize_wsl2.sh https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh
 
 # Проверить систему
 wsl2-monitor.sh
