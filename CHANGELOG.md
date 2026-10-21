@@ -4,6 +4,10 @@
 
 ## [Не выпущено]
 
+## [v2026.10.21.1] - 2026-10-21
+
+Второй выпуск: оформление и документация, файлы сообщества и исправления, найденные при сверке документов с кодом (`docs/plan.md`, этап «Оформление и документация 2026-10-21»).
+
 ### Добавлено
 - `LICENSE` (MIT), `SECURITY.md` с приватным каналом для сообщений об уязвимостях, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, формы issue и шаблон PR.
 - `CHANGELOG.md`; история версий перенесена сюда из README.
@@ -132,5 +136,6 @@
 - Создан WSL2 скрипт с Zsh + Starship
 - NVIDIA Container Toolkit + CUDA поддержка
 
-[Не выпущено]: https://github.com/snaplyze/optimize-debian/compare/v2026.10.21...main
+[Не выпущено]: https://github.com/snaplyze/optimize-debian/compare/v2026.10.21.1...main
+[v2026.10.21.1]: https://github.com/snaplyze/optimize-debian/releases/tag/v2026.10.21.1
 [v2026.10.21]: https://github.com/snaplyze/optimize-debian/releases/tag/v2026.10.21

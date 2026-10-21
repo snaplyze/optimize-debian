@@ -93,7 +93,7 @@ sudo ./optimize_wsl2.sh
 Закрепленный выпуск вместо `main` (см. [Версии и выпуски](../README.md#версии-и-выпуски)):
 
 ```bash
-TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
+TAG=v2026.10.21.1   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
 bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_wsl2.sh")
 ```
 

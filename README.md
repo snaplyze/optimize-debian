@@ -195,7 +195,7 @@ TUI: основной backend — Charmbracelet `gum`; если его нет, �
 - Если версия из `main` повела себя не так, запустите предыдущий выпуск: замените `main` в адресе на его тег.
 
 ```bash
-TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
+TAG=v2026.10.21.1   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
 bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_vps.sh")
 ```
 

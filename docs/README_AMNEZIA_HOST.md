@@ -109,7 +109,7 @@ sudo ./optimize_amnezia_host.sh --firewall-phase locked --yes
 Закрепленный выпуск вместо `main` (теги `vГГГГ.ММ.ДД`, см. [Версии и выпуски](../README.md#версии-и-выпуски)):
 
 ```bash
-TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
+TAG=v2026.10.21.1   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
 bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_amnezia_host.sh") --user "$OPERATOR" --yes
 ```
 
