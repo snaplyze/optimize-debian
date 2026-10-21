@@ -11,20 +11,31 @@ concurrency:
   cancel-in-progress: true
 jobs:
   checks:
-    # The runner is self-hosted and the repository is public. This condition keeps an unchanged
-    # workflow to the owner's pushes and the owner's pull requests from this repository, but a
-    # pull request runs the workflow of its own merge commit, so a fork can drop it: the boundary
-    # for forks is the repository's approval of fork pull request workflows ("all external
-    # contributors"). Never approve a fork's run: approving runs that fork's workflow here.
-    if: >-
-      github.actor == github.repository_owner &&
+    # The runner is self-hosted and the repository is public. An unchanged workflow runs the
+    # checks there only for the owner's pushes and the owner's pull requests from this
+    # repository. Any other source gets this job on a GitHub-hosted runner, where its first step
+    # fails before the code is checked out: `checks` is a required check of main, and a job
+    # skipped by `if:` would count as passed. A pull request runs the workflow of its own merge
+    # commit, so a fork can change all of this: the boundary for forks is the repository's
+    # approval of fork pull request workflows ("all external contributors"). Never approve a
+    # fork's run: approving runs that fork's workflow here.
+    runs-on: >-
+      ${{ fromJSON(
+      (github.actor == github.repository_owner &&
       (github.event_name == 'push' ||
-       (github.event.pull_request.user.login == github.repository_owner &&
-        github.event.pull_request.head.repo.full_name == github.repository))
-    runs-on: [self-hosted, Linux, X64, fedora, project-optimize-debian]
+      (github.event.pull_request.user.login == github.repository_owner &&
+      github.event.pull_request.head.repo.full_name == github.repository)))
+      && '["self-hosted", "Linux", "X64", "fedora", "project-optimize-debian"]'
+      || '"ubuntu-latest"') }}
     # Every check takes about 10 seconds locally; the limit only stops a hang.
     timeout-minutes: 10
     steps:
+      - name: Trusted source
+        # Only an untrusted source runs on a GitHub-hosted runner (see runs-on above).
+        if: runner.environment != 'self-hosted'
+        run: |
+          echo "::error::Checks run only for the owner's pushes and the owner's pull requests from this repository. The owner checks a contribution by pushing it to a branch here."
+          exit 1
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, resolved 2026-10-20
         with:
           persist-credentials: false
