@@ -1823,6 +1823,13 @@ FAIL2BAN_JAIL_LOCAL="/etc/fail2ban/jail.local"
 SAMBA_CONF="/etc/samba/smb.conf"
 SAMBA_SHARE_PATH="/mnt/ssd"
 UFW_BIN="/usr/sbin/ufw"
+# Swap file: the paths and the binaries are variables so that tests can point them at a temporary tree.
+SWAPFILE_PATH="/swapfile"
+FSTAB_FILE="/etc/fstab"
+SWAPON_BIN="/usr/sbin/swapon"
+SWAPOFF_BIN="/usr/sbin/swapoff"
+MKSWAP_BIN="/usr/sbin/mkswap"
+FALLOCATE_BIN="/usr/bin/fallocate"
 
 # Succeeds when $1 is one authorized_keys line that starts with a key type and that
 # ssh-keygen can read. ssh-keygen -l alone also takes "host ssh-ed25519 AAAA..."
@@ -2207,6 +2214,71 @@ JAIL_EOF
     fi
     cat "$tmp" > "$FAIL2BAN_JAIL_LOCAL"
     rm -f "$tmp"
+}
+
+# Removes the lines of SWAPFILE_PATH from FSTAB_FILE.
+drop_swapfile_fstab_entry() {
+    [ -f "$FSTAB_FILE" ] || return 0
+    sed -i -E "\\#^[[:space:]]*${SWAPFILE_PATH}([[:space:]]|\$)#d" "$FSTAB_FILE"
+}
+
+# Keeps exactly one line for SWAPFILE_PATH in FSTAB_FILE.
+ensure_swapfile_fstab_entry() {
+    local path_re="^[[:space:]]*${SWAPFILE_PATH}"
+
+    if [ "$(grep -Ec -- "${path_re}([[:space:]]|\$)" "$FSTAB_FILE" 2>/dev/null || true)" = 1 ] && \
+        grep -Eq -- "${path_re}[[:space:]]+none[[:space:]]+swap[[:space:]]" "$FSTAB_FILE"; then
+        return 0
+    fi
+    drop_swapfile_fstab_entry
+    printf '%s none swap sw 0 0\n' "$SWAPFILE_PATH" >> "$FSTAB_FILE"
+}
+
+# Sets up the swap file SWAPFILE_PATH with the size $1 (GiB, a positive integer).
+# An active file of that size stays as it is. An active file of another size is turned off
+# first; when that fails the current swap stays untouched and the step carries on.
+setup_swap_file() {
+    local size_gb="$1"
+    local target_bytes=$((size_gb * 1024 * 1024 * 1024))
+    local current_bytes
+
+    if "$SWAPON_BIN" --show=NAME --noheadings 2>/dev/null | awk -v p="$SWAPFILE_PATH" '$1 == p { found = 1 } END { exit !found }'; then
+        current_bytes=$(stat -c %s "$SWAPFILE_PATH" 2>/dev/null || echo 0)
+        if [ "$current_bytes" = "$target_bytes" ]; then
+            ensure_swapfile_fstab_entry
+            log "Swap file ${SWAPFILE_PATH} is already active with ${size_gb}GB, keeping it"
+            return 0
+        fi
+        log "Removing existing swap (to ensure correct size)..."
+        if ! "$SWAPOFF_BIN" "$SWAPFILE_PATH"; then
+            warn "Could not turn off ${SWAPFILE_PATH} (not enough free memory is the likely cause); keeping the current swap"
+            return 0
+        fi
+        rm -f "$SWAPFILE_PATH"
+        drop_swapfile_fstab_entry
+    fi
+
+    # Check if the remaining swap (from partitions or other sources) is sufficient.
+    # awk sums up the total existing swap bytes.
+    local existing_bytes existing_gb
+    existing_bytes=$("$SWAPON_BIN" --show --noheadings --bytes 2>/dev/null | awk '{sum+=$3} END {print sum}')
+    existing_bytes=${existing_bytes:-0}
+
+    if [ "$existing_bytes" -ge "$target_bytes" ]; then
+        existing_gb=$(LC_NUMERIC=C awk "BEGIN {printf \"%.1f\", $existing_bytes/1024/1024/1024}")
+        log "Sufficient existing swap detected (${existing_gb}GB >= ${size_gb}GB). Skipping ${SWAPFILE_PATH} creation."
+        return 0
+    fi
+
+    log "Creating ${size_gb}GB Swap..."
+    rm -f "$SWAPFILE_PATH"
+    if ! "$FALLOCATE_BIN" -l "${size_gb}G" "$SWAPFILE_PATH" 2>/dev/null; then
+        dd if=/dev/zero of="$SWAPFILE_PATH" bs=1G count="$size_gb" status=progress
+    fi
+    chmod 600 "$SWAPFILE_PATH"
+    "$MKSWAP_BIN" "$SWAPFILE_PATH"
+    "$SWAPON_BIN" "$SWAPFILE_PATH"
+    ensure_swapfile_fstab_entry
 }
 
 print_usage() {
@@ -3101,40 +3173,7 @@ if $PERFORMANCE_TUNING; then
         fi
     fi
     
-    # Validated swap check and recreate logic (ported from optimize_vps.sh)
-    if /usr/sbin/swapon --show | grep -q "/swapfile"; then
-        log "Removing existing swap (to ensure correct size)..."
-        /usr/sbin/swapoff /swapfile 2>/dev/null || true
-        rm -f /swapfile
-        sed -i '/\/swapfile/d' /etc/fstab
-    fi
-
-    # Check if remaining swap (from partitions or other sources) is sufficient
-    # We use awk to sum up total existing swap bytes
-    EXISTING_SWAP_BYTES=$(/usr/sbin/swapon --show --noheadings --bytes 2>/dev/null | awk '{sum+=$3} END {print sum}')
-    # Default to 0 if command fails or empty
-    EXISTING_SWAP_BYTES=${EXISTING_SWAP_BYTES:-0}
-    
-    # Calculate desired size in bytes (SWAP_SIZE is in GB)
-    REQUIRED_BYTES=$((SWAP_SIZE * 1024 * 1024 * 1024))
-    
-    if [ "$EXISTING_SWAP_BYTES" -ge "$REQUIRED_BYTES" ]; then
-        EXISTING_GB=$(LC_NUMERIC=C awk "BEGIN {printf \"%.1f\", $EXISTING_SWAP_BYTES/1024/1024/1024}")
-        log "Sufficient existing swap detected (${EXISTING_GB}GB >= ${SWAP_SIZE}GB). Skipping /swapfile creation."
-    else
-        log "Creating ${SWAP_SIZE}GB Swap..."
-        if ! /usr/bin/fallocate -l "${SWAP_SIZE}G" /swapfile 2>/dev/null; then
-            dd if=/dev/zero of=/swapfile bs=1G count="$SWAP_SIZE" status=progress
-        fi
-        
-        chmod 600 /swapfile
-        /usr/sbin/mkswap /swapfile
-        /usr/sbin/swapon /swapfile
-        
-        if ! grep -q "/swapfile" /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
-        fi
-    fi
+    setup_swap_file "$SWAP_SIZE"
 
     # Ensure /etc/sysctl.conf exists
     if [ ! -f /etc/sysctl.conf ]; then
