@@ -1183,27 +1183,31 @@ create_target_user_if_needed() {
         exit 1
     fi
 
+    # Decide the key source before the account exists: stopping later would leave a user without keys.
+    source_keys=""
+    if [ -z "$SSH_PUBLIC_KEY" ] && ! source_keys="$(resolve_authorized_keys_source)"; then
+        if $ASSUME_YES; then
+            error "Cannot create ${TARGET_USER} safely: no authorized_keys source found for the invoking sudo user"
+            error "Pass --ssh-public-key or --ssh-public-key-file when using --create-user non-interactively"
+            exit 1
+        fi
+        echo ""
+        info "No authorized_keys source detected for the invoking sudo user."
+        info "Paste a public key for ${TARGET_USER} so SSH access works after hardening."
+        read -r -p "SSH Public Key: " SSH_PUBLIC_KEY || true
+        if [ -z "$SSH_PUBLIC_KEY" ]; then
+            error "SSH public key cannot be empty when creating a new user without a key source"
+            exit 1
+        fi
+    fi
+
     "$ADDUSER_BIN" --gecos "" --disabled-password "$TARGET_USER"
     user_home="$(user_home_for "$TARGET_USER")"
     install -d -m 700 -o "$TARGET_USER" -g "$TARGET_USER" "$user_home/.ssh"
     if [ -n "$SSH_PUBLIC_KEY" ]; then
         append_authorized_key_line_unique "$SSH_PUBLIC_KEY" "$user_home/.ssh/authorized_keys"
-    elif source_keys="$(resolve_authorized_keys_source)"; then
-        append_authorized_keys_unique "$source_keys" "$user_home/.ssh/authorized_keys"
-    elif ! $ASSUME_YES; then
-        echo ""
-        info "No authorized_keys source detected for the invoking sudo user."
-        info "Paste a public key for ${TARGET_USER} so SSH access works after hardening."
-        read -r -p "SSH Public Key: " SSH_PUBLIC_KEY
-        if [ -z "$SSH_PUBLIC_KEY" ]; then
-            error "SSH public key cannot be empty when creating a new user without a key source"
-            exit 1
-        fi
-        append_authorized_key_line_unique "$SSH_PUBLIC_KEY" "$user_home/.ssh/authorized_keys"
     else
-        error "Cannot create ${TARGET_USER} safely: no authorized_keys source found for the invoking sudo user"
-        error "Pass --ssh-public-key or --ssh-public-key-file when using --create-user non-interactively"
-        exit 1
+        append_authorized_keys_unique "$source_keys" "$user_home/.ssh/authorized_keys"
     fi
     chown "$TARGET_USER:$TARGET_USER" "$user_home/.ssh/authorized_keys"
 
