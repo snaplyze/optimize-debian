@@ -159,12 +159,10 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$T
 
 ```mermaid
 flowchart LR
-    A["Проверки: root, Debian 12/13, WSL2"] --> B["Меню"]
-    B --> C["wsl.conf, APT, пользователь, локали"]
-    C --> D["Fish, Bash, Go, fnm, ssh-agent"]
-    D --> E["Docker, NVIDIA, CUDA"]
-    E --> F["sysctl, лимиты, обновления, утилиты, journald"]
-    F --> G["Очистка и итог; wsl --shutdown"]
+    A["Проверки,<br>меню,<br>wsl.conf"] --> B["APT,<br>пользователь,<br>локали"]
+    B --> C["Fish, Go,<br>fnm,<br>ssh-agent"]
+    C --> D["Docker,<br>NVIDIA, CUDA"]
+    D --> E["sysctl, лимиты,<br>утилиты, итог;<br>wsl --shutdown"]
 ```
 
 Перед шагами: разбор аргументов; `EUID` должен быть 0; `/proc/version` содержит `microsoft` или задана `WSL_DISTRO_NAME`; ядро WSL2 по `/proc/sys/kernel/osrelease`. Затем `tui_init` (поиск или загрузка `gum`) и баннер.

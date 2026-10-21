@@ -105,18 +105,16 @@ bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$T
 
 ```mermaid
 flowchart TD
-    A["Проверки, бэкап, снимок SSH и firewall"] --> B{"VERSION_CODENAME"}
-    B -- "bullseye (11)" --> C["Шаг 11 → 12"]
-    B -- "bookworm (12)" --> E["Шаг 12 → 13"]
-    B -- "trixie (13)" --> N["Обновление не требуется, код 0"]
-    B -- "другое" --> X["Остановка, код 1"]
-    C --> D{"Продолжить без перезагрузки?"}
-    D -- "--yes без --allow-two-hop-no-reboot" --> R["Остановка, код 0: reboot и повторный запуск"]
-    D -- "ответ N" --> R
-    D -- "ответ y или --yes --allow-two-hop-no-reboot" --> E
-    R -. "после reboot скрипт видит bookworm" .-> E
-    E --> F["Ядро, systemd-cryptsetup, проверка os-release"]
-    F --> G["Рекомендации; reboot делаете вы"]
+    A["Проверки, бэкап,<br>снимок SSH и firewall"] --> B{"Какой Debian?"}
+    B -- "11 bullseye" --> C["Шаг 11 → 12"]
+    B -- "12 bookworm" --> E["Шаг 12 → 13"]
+    B -- "13 trixie" --> N["Не требуется, код 0"]
+    B -- "другое" --> X["Стоп, код 1"]
+    C --> D{"Без reboot?"}
+    D -- "ответ N; --yes без<br>--allow-two-hop-no-reboot" --> R["Стоп, код 0:<br>reboot, повторный<br>запуск"]
+    D -- "ответ y; --yes<br>--allow-two-hop-no-reboot" --> E
+    R -. "после reboot" .-> A
+    E --> G["Ядро, systemd-cryptsetup,<br>os-release; рекомендации,<br>reboot делаете вы"]
 ```
 
 - Debian 12: один шаг `bookworm → trixie`.
