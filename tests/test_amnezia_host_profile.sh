@@ -904,6 +904,22 @@ test_ssh_hardening_replaces_the_legacy_dropin() {
             die "the earlier drop-in must be restored"
         [ ! -e "$SSH_HARDENING_DROPIN" ] || die "the new drop-in must be removed"
 
+        # The earlier drop-in cannot be put back: the script stops after our drop-in is undone,
+        # and the copy stays with its path printed.
+        reset_ssh_case
+        mkdir -p "$T/sshd_config.d"
+        printf "# Minimal Amnezia host SSH baseline\nAllowUsers old\n" > "$SSH_LEGACY_HARDENING_DROPIN"
+        : > "$T/sshd_test_fails"
+        cp() { [ "${3:-}" != "$SSH_LEGACY_HARDENING_DROPIN" ] || return 1; command cp "$@"; }
+        run_status configure_ssh_hardening
+        unset -f cp
+        assert_failed "a failed sshd -t must stop the step"
+        [ ! -e "$SSH_HARDENING_DROPIN" ] || die "the rejected drop-in must be removed first"
+        kept="$(sed -n "s/.*its previous content is in \(.*\)$/\1/p" "$T/out")"
+        [ -n "$kept" ] && [ "$(cat "$kept")" = "$(printf "# Minimal Amnezia host SSH baseline\nAllowUsers old")" ] || \
+            die "the copy of the earlier drop-in must stay and be named: $(cat "$T/out")"
+        rm -f "$kept"
+
         # Another file with that name is an operator file and stays.
         reset_ssh_case
         mkdir -p "$T/sshd_config.d"

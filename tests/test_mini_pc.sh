@@ -233,6 +233,20 @@ test_ssh_hardening_replaces_the_legacy_dropin() {
             die "the earlier drop-in must be restored"
         [ ! -e "$SSHD_HARDENING_FILE" ] || die "the new drop-in must be removed"
     '
+    # The earlier drop-in cannot be put back: its copy stays and the path is printed.
+    run_case "$SSH_MOCKS"'
+        mkdir -p "$T/sshd_config.d"
+        printf "PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers old\n" > "$SSHD_LEGACY_HARDENING_FILE"
+        SSHD_T_RC=1
+        cp() { [ "${3:-}" != "$SSHD_LEGACY_HARDENING_FILE" ] || return 1; command cp "$@"; }
+        run_status apply_ssh_hardening alice
+        assert_rc 1 "failed sshd -t must fail the hardening"
+        [ ! -e "$SSHD_HARDENING_FILE" ] || die "the new drop-in must be removed first"
+        kept="$(sed -n "s/.*its previous content is in \(.*\)$/\1/p" "$T/out")"
+        [ -n "$kept" ] && [ "$(cat "$kept")" = "$(printf "PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\nAllowUsers old")" ] || \
+            die "the copy of the earlier drop-in must stay and be named: $(cat "$T/out")"
+        rm -f "$kept"
+    '
     # The same name with other content is an operator file and stays.
     run_case "$SSH_MOCKS"'
         mkdir -p "$T/sshd_config.d"

@@ -1842,29 +1842,31 @@ SSH_HARDENING_FILE="/etc/ssh/sshd_config.d/00-optimize-hardening.conf"
 # Earlier versions wrote the drop-in here, where a drop-in sorting first could override it.
 SSH_LEGACY_HARDENING_FILE="/etc/ssh/sshd_config.d/99-hardening.conf"
 
-# Puts back the drop-ins saved in $1 (ours) and $2 (the earlier version's), temporary copies
-# removed here, or removes ours when there was none.
+# Puts back the drop-in saved in $1 (ours) or removes ours when there was none, then the earlier
+# version's drop-in saved in $2. A temporary copy is removed once it is back; one that cannot be
+# put back stays, and its path is printed.
 restore_ssh_hardening_dropin() {
     local previous_dropin="${1:-}"
     local legacy_dropin="${2:-}"
     local rc=0
 
+    if [ -n "$previous_dropin" ]; then
+        if cat "$previous_dropin" > "$SSH_HARDENING_FILE"; then
+            rm -f "$previous_dropin"
+        else
+            error "Could not restore $SSH_HARDENING_FILE; its previous content is in $previous_dropin"
+            rc=1
+        fi
+    else
+        rm -f "$SSH_HARDENING_FILE"
+    fi
     if [ -n "$legacy_dropin" ]; then
-        if cat "$legacy_dropin" > "$SSH_LEGACY_HARDENING_FILE"; then
+        if cp -p "$legacy_dropin" "$SSH_LEGACY_HARDENING_FILE"; then
             rm -f "$legacy_dropin"
         else
             error "Could not restore $SSH_LEGACY_HARDENING_FILE; its previous content is in $legacy_dropin"
             rc=1
         fi
-    fi
-    if [ -n "$previous_dropin" ]; then
-        if ! cat "$previous_dropin" > "$SSH_HARDENING_FILE"; then
-            error "Could not restore $SSH_HARDENING_FILE; its previous content is in $previous_dropin"
-            return 1
-        fi
-        rm -f "$previous_dropin"
-    else
-        rm -f "$SSH_HARDENING_FILE"
     fi
     return "$rc"
 }
@@ -1898,15 +1900,10 @@ PubkeyAuthentication yes
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
-UsePAM yes
 X11Forwarding no
-PrintMotd no
-AcceptEnv LANG LC_*
 ClientAliveInterval 300
 ClientAliveCountMax 2
 MaxAuthTries 3
-MaxSessions 10
-AllowTcpForwarding yes
 
 # Only allow specific user
 AllowUsers $allowed_user

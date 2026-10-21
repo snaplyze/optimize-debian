@@ -1845,18 +1845,33 @@ restart_ssh_service() {
     systemctl restart ssh.service || systemctl restart sshd.service
 }
 
-# Put the previous drop-in ($1) back (or remove ours when there was none), and the earlier
-# version's drop-in ($2) when it was set aside.
+# Put the previous drop-in back from its temporary copy $1 (or remove ours when there was none),
+# then the earlier version's drop-in from $2. A copy is removed once it is back; one that cannot
+# be put back stays, and its path is printed.
 revert_ssh_hardening_dropin() {
     local backup="${1:-}"
     local legacy_backup="${2:-}"
+    local rc=0
 
-    [ -z "$legacy_backup" ] || cp -p "$legacy_backup" "$SSHD_LEGACY_HARDENING_FILE"
     if [ -n "$backup" ]; then
-        cp -p "$backup" "$SSHD_HARDENING_FILE"
+        if cp -p "$backup" "$SSHD_HARDENING_FILE"; then
+            rm -f "$backup"
+        else
+            error "Could not restore $SSHD_HARDENING_FILE; its previous content is in $backup"
+            rc=1
+        fi
     else
         rm -f "$SSHD_HARDENING_FILE"
     fi
+    if [ -n "$legacy_backup" ]; then
+        if cp -p "$legacy_backup" "$SSHD_LEGACY_HARDENING_FILE"; then
+            rm -f "$legacy_backup"
+        else
+            error "Could not restore $SSHD_LEGACY_HARDENING_FILE; its previous content is in $legacy_backup"
+            rc=1
+        fi
+    fi
+    return "$rc"
 }
 
 # Key-only login for $1. The drop-in stays only when `sshd -t` accepts it, sshd -T
@@ -1911,8 +1926,7 @@ apply_ssh_hardening() {
 
     if ! sshd -t; then
         error "SSH configuration test failed; reverting $SSHD_HARDENING_FILE, SSH is not restarted"
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
-        rm -f "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         return 1
     fi
 
@@ -1923,18 +1937,16 @@ apply_ssh_hardening() {
             error "  $line"
         done <<<"${mismatches:-sshd -T failed}"
         error "A drop-in in $dropin_dir that sorts first, or a line above the Include in /etc/ssh/sshd_config, sets them"
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
-        rm -f "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         return 1
     fi
 
     if ! restart_ssh_service; then
         error "Failed to restart the SSH service with the hardened configuration; reverting $SSHD_HARDENING_FILE"
-        revert_ssh_hardening_dropin "$backup" "$legacy_backup"
+        revert_ssh_hardening_dropin "$backup" "$legacy_backup" || true
         if ! restart_ssh_service; then
             error "SSH still does not restart after the revert; check 'systemctl status ssh' on the console"
         fi
-        rm -f "$backup" "$legacy_backup"
         return 1
     fi
 

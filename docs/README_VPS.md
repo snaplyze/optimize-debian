@@ -465,19 +465,16 @@ PubkeyAuthentication yes
 PermitEmptyPasswords no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
-UsePAM yes
 X11Forwarding no
-PrintMotd no
-AcceptEnv LANG LC_*
 ClientAliveInterval 300
 ClientAliveCountMax 2
 MaxAuthTries 3
-MaxSessions 10
-AllowTcpForwarding yes
 AllowUsers <пользователь>
 ```
 
 sshd берет первое прочитанное значение параметра, а drop-in из `/etc/ssh/sshd_config.d/` читает по порядку имен, поэтому файл назван `00-…` и читается раньше остальных (например, `50-cloud-init.conf` с `PasswordAuthentication yes`). После `sshd -t` скрипт сверяет действующие значения через `sshd -T`: если их задает файл, прочитанный раньше, или `sshd_config` не подключает каталог drop-in, закалка откатывается, SSH не перезапускается, а скрипт называет расходящиеся параметры и останавливается. Файл `99-hardening.conf` прежних версий скрипта удаляется; файл с тем же именем, но другим содержимым остается.
+
+Других параметров sshd (например, `AllowTcpForwarding`, `MaxSessions`) скрипт не задает, и ваши значения в drop-in остаются в силе. `X11Forwarding`, `ClientAlive*` и `MaxAuthTries` можно переопределить в drop-in, имя которого сортируется раньше (например, `00-00-local.conf`); параметры входа (`PermitRootLogin`, `PasswordAuthentication`, `PubkeyAuthentication`, `PermitEmptyPasswords`, `KbdInteractiveAuthentication`) так переопределить нельзя — скрипт остановится на сверке.
 
 ## 🔄 Обновление и поддержка
 
