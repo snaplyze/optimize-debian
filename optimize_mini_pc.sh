@@ -2222,36 +2222,52 @@ drop_swapfile_fstab_entry() {
     sed -i -E "\\#^[[:space:]]*${SWAPFILE_PATH}([[:space:]]|\$)#d" "$FSTAB_FILE"
 }
 
-# Keeps exactly one line for SWAPFILE_PATH in FSTAB_FILE.
+# Keeps exactly one line for SWAPFILE_PATH in FSTAB_FILE. A single swap line of the operator
+# (another second field, other options such as pri=) stays as it is.
 ensure_swapfile_fstab_entry() {
     local path_re="^[[:space:]]*${SWAPFILE_PATH}"
 
     if [ "$(grep -Ec -- "${path_re}([[:space:]]|\$)" "$FSTAB_FILE" 2>/dev/null || true)" = 1 ] && \
-        grep -Eq -- "${path_re}[[:space:]]+none[[:space:]]+swap[[:space:]]" "$FSTAB_FILE"; then
+        grep -Eq -- "${path_re}[[:space:]]+[^[:space:]]+[[:space:]]+swap([[:space:]]|\$)" "$FSTAB_FILE"; then
         return 0
     fi
     drop_swapfile_fstab_entry
+    # A last line without a newline would run into ours.
+    if [ -s "$FSTAB_FILE" ] && [ -n "$(tail -c 1 "$FSTAB_FILE")" ]; then
+        printf '\n' >> "$FSTAB_FILE"
+    fi
     printf '%s none swap sw 0 0\n' "$SWAPFILE_PATH" >> "$FSTAB_FILE"
 }
 
 # Sets up the swap file SWAPFILE_PATH with the size $1 (GiB, a positive integer).
 # An active file of that size stays as it is. An active file of another size is turned off
 # first; when that fails the current swap stays untouched and the step carries on.
+# SWAP_FILE_STATE tells the outcome: kept, created, skipped (other swap is enough) or unchanged
+# (not resized).
 setup_swap_file() {
     local size_gb="$1"
     local target_bytes=$((size_gb * 1024 * 1024 * 1024))
     local current_bytes
 
+    SWAP_FILE_STATE=unchanged
+    if [ -e "$SWAPFILE_PATH" ] && [ ! -f "$SWAPFILE_PATH" ]; then
+        warn "${SWAPFILE_PATH} is not a regular file; the swap is left as it is"
+        return 0
+    fi
     if "$SWAPON_BIN" --show=NAME --noheadings 2>/dev/null | awk -v p="$SWAPFILE_PATH" '$1 == p { found = 1 } END { exit !found }'; then
         current_bytes=$(stat -c %s "$SWAPFILE_PATH" 2>/dev/null || echo 0)
         if [ "$current_bytes" = "$target_bytes" ]; then
+            # A file left by someone else may be readable: swapped-out memory stays root's.
+            chown root:root "$SWAPFILE_PATH" 2>/dev/null || true
+            chmod 600 "$SWAPFILE_PATH"
             ensure_swapfile_fstab_entry
+            SWAP_FILE_STATE=kept
             log "Swap file ${SWAPFILE_PATH} is already active with ${size_gb}GB, keeping it"
             return 0
         fi
         log "Removing existing swap (to ensure correct size)..."
         if ! "$SWAPOFF_BIN" "$SWAPFILE_PATH"; then
-            warn "Could not turn off ${SWAPFILE_PATH} (not enough free memory is the likely cause); keeping the current swap"
+            warn "Could not turn off ${SWAPFILE_PATH} (swapoff has to move its pages back into RAM); the current swap stays"
             return 0
         fi
         rm -f "$SWAPFILE_PATH"
@@ -2267,6 +2283,7 @@ setup_swap_file() {
     if [ "$existing_bytes" -ge "$target_bytes" ]; then
         existing_gb=$(LC_NUMERIC=C awk "BEGIN {printf \"%.1f\", $existing_bytes/1024/1024/1024}")
         log "Sufficient existing swap detected (${existing_gb}GB >= ${size_gb}GB). Skipping ${SWAPFILE_PATH} creation."
+        SWAP_FILE_STATE=skipped
         return 0
     fi
 
@@ -2279,6 +2296,7 @@ setup_swap_file() {
     "$MKSWAP_BIN" "$SWAPFILE_PATH"
     "$SWAPON_BIN" "$SWAPFILE_PATH"
     ensure_swapfile_fstab_entry
+    SWAP_FILE_STATE=created
 }
 
 print_usage() {
@@ -3174,6 +3192,7 @@ if $PERFORMANCE_TUNING; then
     fi
     
     setup_swap_file "$SWAP_SIZE"
+    [ "$SWAP_FILE_STATE" != unchanged ] || warn "Swap file not resized to ${SWAP_SIZE}GB; the previous swap stays"
 
     # Ensure /etc/sysctl.conf exists
     if [ ! -f /etc/sysctl.conf ]; then
