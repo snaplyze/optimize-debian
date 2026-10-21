@@ -723,8 +723,13 @@ is_official_debian_list_file() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     $1 == "deb" || $1 == "deb-src" {
       found=1
-      uri=$2
-      if (uri ~ /^\[/) uri=$3
+      i=2
+      # Поле опций [...] может содержать пробелы: пропускаем его до токена с закрывающей ]
+      if ($i ~ /^\[/) {
+        while (i <= NF && $i !~ /\]/) i++
+        i++
+      }
+      uri=$i
       if (uri !~ /^https?:\/\/([^/]+\.)?(deb|security)\.debian\.org(\/|$)/) {
         bad=1
       }
