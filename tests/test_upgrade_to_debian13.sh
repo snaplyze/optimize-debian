@@ -766,6 +766,13 @@ test_official_debian_list_file_classification() {
 deb http://deb.debian.org/debian bookworm main
 
 deb http://security.debian.org/debian-security bookworm-security main"
+        check 0 "deb [arch=amd64] http://deb.debian.org/debian bookworm main"
+        check 0 "deb [arch=amd64 signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://deb.debian.org/debian bookworm main"
+        check 0 "deb-src [arch=amd64 signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://security.debian.org/debian-security bookworm-security main"
+        check 0 "deb [ arch=amd64 ] http://deb.debian.org/debian bookworm main"
+        check 1 "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable"
+        check 1 "deb [ arch=amd64 ] https://download.docker.com/linux/debian bookworm stable"
+        check 1 "deb [arch=amd64 signed-by=/usr/share/keyrings/debian-archive-keyring.gpg"
         check 1 "deb https://download.docker.com/linux/debian bookworm stable"
         check 1 "deb [signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable"
         check 1 "deb http://deb.debian.org.evil.example/debian bookworm main"
