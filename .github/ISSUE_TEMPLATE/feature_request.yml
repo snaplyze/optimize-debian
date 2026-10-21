@@ -1,0 +1,42 @@
+name: Предложение
+description: Новая возможность или изменение поведения скриптов.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите задачу, а не только решение: так проще оценить, подходит ли изменение проекту. Правила участия: [CONTRIBUTING.md](https://github.com/snaplyze/optimize-debian/blob/main/CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Задача или проблема
+      description: Что вы хотите сделать и что сейчас мешает.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предложение
+      description: Как это должно работать. Если есть команды или настройки, приведите их.
+    validations:
+      required: true
+  - type: dropdown
+    id: scripts
+    attributes:
+      label: Затронутые скрипты
+      multiple: true
+      options:
+        - optimize_vps.sh
+        - optimize_amnezia_host.sh
+        - optimize_mini_pc.sh
+        - optimize_wsl2.sh
+        - upgrade-to-debian13.sh
+        - lib/ (общие функции)
+        - Документация
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы
+      description: Что вы пробовали или рассматривали вместо этого и почему не подошло.

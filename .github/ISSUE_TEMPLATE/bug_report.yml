@@ -1,0 +1,90 @@
+name: Ошибка
+description: Скрипт завершился с ошибкой или сделал не то, что описано в документации.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за сообщение. Уязвимости сюда не пишите: только закрыто, как описано в [SECURITY.md](https://github.com/snaplyze/optimize-debian/blob/main/SECURITY.md).
+  - type: dropdown
+    id: script
+    attributes:
+      label: Скрипт
+      options:
+        - optimize_vps.sh
+        - optimize_amnezia_host.sh
+        - optimize_mini_pc.sh
+        - optimize_wsl2.sh
+        - upgrade-to-debian13.sh
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Версия
+      description: "`main` с датой загрузки или тег выпуска `vГГГГ.ММ.ДД`, плюс версия скрипта из `bash <скрипт> --help` (строка `Version:` или `Версия:`)."
+      placeholder: "main, загружен 2026-10-21; Version: 3.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Окружение
+      options:
+        - VPS/облако
+        - Хост AmneziaVPN
+        - Мини-ПК
+        - WSL2
+        - Другое
+    validations:
+      required: true
+  - type: dropdown
+    id: debian
+    attributes:
+      label: Версия Debian
+      description: Исходная версия на момент запуска.
+      options:
+        - "11"
+        - "12"
+        - "13"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Что произошло
+      description: Сообщение об ошибке, на каком шаге, что изменилось в системе.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Что ожидалось
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Шаги воспроизведения
+      description: Команда запуска, выбранные пункты меню и ответы на вопросы скрипта.
+      placeholder: |
+        1. bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
+        2. Выбрал ...
+        3. На шаге ... вывод ...
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Выдержка лога
+      description: "Нужные строки из `/var/log/vps_optimization.log` или `/var/log/debian-upgrade/upgrade-<TS>.log`. Перед вставкой удалите секреты, ключи, IP-адреса и имена хостов."
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Перед отправкой
+      options:
+        - label: Я поискал похожие issues и не нашел такой же.
+          required: true
+        - label: Это не уязвимость. Уязвимости сообщаю закрыто через SECURITY.md.
+          required: true
