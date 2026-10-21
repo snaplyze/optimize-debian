@@ -142,8 +142,42 @@ EOF
     rm -rf "$dir"
 }
 
+# SEC-8: an interrupted gum download leaves no temporary directory when lib/common.sh is there:
+# the directory comes from common_temp_dir, whose EXIT trap also runs on SIGTERM.
+test_install_gum_cleans_up_when_interrupted() {
+    local dir
+    dir="$(mktemp -d)"
+    mkdir -p "$dir/bin" "$dir/tmp"
+    # The download is cut by SIGTERM to the script after a partial archive is written.
+    cat > "$dir/bin/curl" <<'CURL_EOF'
+#!/usr/bin/env bash
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+printf 'partial' > "$out"
+kill -TERM "$PPID"
+exit 22
+CURL_EOF
+    chmod +x "$dir/bin/curl"
+
+    PATH="$dir/bin:$PATH" TMPDIR="$dir/tmp" GUM="$dir/gum" bash -c '
+        source "$1"
+        source "$2"
+        tui_gum_asset_arch() { printf "x86_64\n"; }
+        tui_install_gum
+    ' _ "$ROOT_DIR/lib/common.sh" "$ROOT_DIR/lib/tui.sh" </dev/null >/dev/null 2>&1 || true
+    [ -z "$(ls -A "$dir/tmp")" ] || fail "an interrupted gum download must not leave $(ls -A "$dir/tmp") behind"
+    [ ! -e "$dir/gum" ] || fail "an interrupted download must not install gum"
+    rm -rf "$dir"
+}
+
 main() {
     test_install_gum_checks_the_pinned_sum
+    test_install_gum_cleans_up_when_interrupted
     test_forced_backend_selection
     test_auto_backend_prefers_gum_and_skips_ncurses
     test_plain_prompt_defaults
