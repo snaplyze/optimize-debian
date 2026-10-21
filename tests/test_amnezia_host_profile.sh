@@ -930,8 +930,8 @@ test_docker_repository_and_packages() {
         ID=debian
         VERSION_CODENAME=trixie
         TARGET_USER=ops
-        curl() { event "curl $*"; printf "KEYDATA\n"; }
-        gpg() { event "gpg $*"; cat > /dev/null; : > "$3"; }
+        # The key check itself is tested in tests/test_downloads.sh.
+        common_install_apt_key() { event "apt-key $*"; [ -z "${KEY_FAILS:-}" ] && : > "$2"; }
         dpkg() { printf "amd64\n"; }
         common_apt_sources_changed() { event "apt-sources-changed"; }
         common_apt_update() { event "apt-update $1"; }
@@ -942,22 +942,25 @@ test_docker_repository_and_packages() {
 
         run_status install_docker_ce
         assert_rc 0 "install_docker_ce"
-        assert_event "curl -fsSL https://download.docker.com/linux/debian/gpg"
-        assert_event "gpg --dearmor -o $DOCKER_KEYRING"
+        assert_event "apt-key docker $DOCKER_KEYRING"
         for line in "URIs: https://download.docker.com/linux/debian" "Suites: trixie" "Architectures: amd64" "Signed-By: $DOCKER_KEYRING"; do
             grep -Fxq "$line" "$DOCKER_SOURCES_FILE" || die "docker.sources lacks: $line"
         done
         assert_event "safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
-        assert_before "gpg --dearmor -o $DOCKER_KEYRING" "apt-sources-changed"
+        assert_before "apt-key docker $DOCKER_KEYRING" "apt-sources-changed"
         assert_before "apt-sources-changed" "apt-update Docker repository refresh"
         assert_before "apt-update Docker repository refresh" "safe_install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
         assert_before "groupadd -f docker" ensure_target_user_privileges
 
-        # An existing keyring is not downloaded again.
+        # A key that is not accepted stops the step before the repository is added.
         : > "$EVENTS"
+        rm -f "$DOCKER_SOURCES_FILE"
+        KEY_FAILS=1
         run_status install_docker_ce
-        assert_rc 0 "install_docker_ce, second run"
-        assert_no_event_matches "^curl"
+        assert_rc 1 "install_docker_ce with a refused key"
+        [ ! -e "$DOCKER_SOURCES_FILE" ] || die "a refused key must not add the Docker repository"
+        assert_no_event_matches "^apt-update"
+        assert_no_event_matches "^safe_install"
     '
 }
 

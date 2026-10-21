@@ -430,6 +430,212 @@ if ! declare -F common_systemd_running >/dev/null; then
     }
 fi
 
+if ! declare -F common_temp_dir >/dev/null; then
+    # common_temp_dir <variable> [parent]: a fresh directory from mktemp -d (inside <parent> when
+    # given) stored in <variable>. It is removed when the script exits, also on an error or a
+    # signal, unless the caller removed it first. The removal is an EXIT trap set here: an EXIT trap
+    # the caller set before stays and skips it, so the scripts set none of their own (hygiene test).
+    common_temp_dir() {
+        local __common_var="${1:-}" __common_parent="${2:-}" __common_dir
+
+        if [ -n "$__common_parent" ]; then
+            __common_dir="$(mktemp -d "$__common_parent/.optimize.XXXXXX")" || return 1
+        else
+            __common_dir="$(mktemp -d)" || return 1
+        fi
+        COMMON_TEMP_DIRS+=("$__common_dir")
+        if [ -z "$(trap -p EXIT)" ]; then
+            trap common_remove_temp_dirs EXIT
+        fi
+        printf -v "$__common_var" '%s' "$__common_dir"
+    }
+
+    # Removes the directories of common_temp_dir that are still there.
+    common_remove_temp_dirs() {
+        local dir
+
+        for dir in ${COMMON_TEMP_DIRS[@]+"${COMMON_TEMP_DIRS[@]}"}; do
+            [ ! -d "$dir" ] || rm -rf -- "$dir"
+        done
+        COMMON_TEMP_DIRS=()
+    }
+
+    # common_keep_temp_dir <dir>: <dir> of common_temp_dir is no longer removed on exit (it holds
+    # something the operator has to recover).
+    common_keep_temp_dir() {
+        local dir kept=()
+
+        for dir in ${COMMON_TEMP_DIRS[@]+"${COMMON_TEMP_DIRS[@]}"}; do
+            [ "$dir" = "${1:-}" ] || kept+=("$dir")
+        done
+        COMMON_TEMP_DIRS=(${kept[@]+"${kept[@]}"})
+    }
+
+    # common_download <url> <file>: HTTPS only, redirects included; every attempt is bounded in
+    # connection and total time, a few retries on transient errors start only within that total
+    # time, so a bad network fails within about twice COMMON_DOWNLOAD_MAX_TIME instead of hanging.
+    common_download() {
+        curl -fsSL --proto '=https' --proto-redir '=https' \
+            --connect-timeout "${COMMON_DOWNLOAD_CONNECT_TIMEOUT:-20}" \
+            --max-time "${COMMON_DOWNLOAD_MAX_TIME:-900}" \
+            --retry "${COMMON_DOWNLOAD_RETRIES:-3}" --retry-delay 3 \
+            --retry-max-time "${COMMON_DOWNLOAD_MAX_TIME:-900}" \
+            -o "$2" "$1"
+    }
+
+    # Third-party downloads pinned in the repository: "<url> <sha256>" of <tool> for a Debian
+    # architecture (dpkg --print-architecture). The sums come from the projects' published
+    # checksums (fnm publishes none: computed from the release asset); a new version needs new
+    # sums. Returns 1 when <tool> has no pin for the architecture.
+    common_pinned_download() {
+        case "${1:-}:${2:-}" in
+            starship:amd64) printf '%s %s\n' https://github.com/starship/starship/releases/download/v1.27.0/starship-x86_64-unknown-linux-gnu.tar.gz 3b94758850901717eb36aa1b53f8492c1322506ec6d41273bc6151e79ed8e4a1 ;;
+            starship:arm64) printf '%s %s\n' https://github.com/starship/starship/releases/download/v1.27.0/starship-aarch64-unknown-linux-musl.tar.gz 341f5cbf24699fa0b27ec88965ad25f862ea09e15d35a543fd6ffdff1d2aa00d ;;
+            fnm:amd64) printf '%s %s\n' https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-linux.zip 7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224 ;;
+            fnm:arm64) printf '%s %s\n' https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-arm64.zip 4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d45599 ;;
+            go:amd64) printf '%s %s\n' https://dl.google.com/go/go1.27.3.linux-amd64.tar.gz 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;;
+            go:arm64) printf '%s %s\n' https://dl.google.com/go/go1.27.3.linux-arm64.tar.gz a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;;
+            cuda-keyring-debian12:amd64) printf '%s %s\n' https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d ;;
+            cuda-keyring-debian13:amd64) printf '%s %s\n' https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1839c7a1e78f5f ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # common_fetch_verified <url> <sha256> <file>: downloads <url> into a fresh directory next to
+    # <file> and moves it there only when its SHA-256 is <sha256>: a partial or substituted download
+    # never reaches <file>, and a large download does not fill a RAM-backed /tmp.
+    common_fetch_verified() {
+        local url="${1:-}" expected="${2:-}" dest="${3:-}"
+        local tmp_dir actual
+
+        if [ -z "$url" ] || [ -z "$dest" ] || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            error "A download needs a URL, a SHA-256 and a target file"
+            return 1
+        fi
+        common_temp_dir tmp_dir "$(dirname "$dest")" || return 1
+        if ! common_download "$url" "$tmp_dir/download"; then
+            rm -rf "$tmp_dir"
+            warn "Download failed: $url"
+            return 1
+        fi
+        actual="$(sha256sum "$tmp_dir/download" | awk '{print $1}')"
+        if [ "$actual" != "$expected" ]; then
+            rm -rf "$tmp_dir"
+            error "Checksum mismatch for $url: expected $expected, got ${actual:-nothing}"
+            return 1
+        fi
+        if ! mv -f "$tmp_dir/download" "$dest"; then
+            rm -rf "$tmp_dir"
+            error "Could not move the download of $url to $dest"
+            return 1
+        fi
+        rm -rf "$tmp_dir"
+    }
+
+    # common_fetch_pinned <tool> <file>: common_fetch_verified with the pin of <tool> for this
+    # machine's architecture.
+    common_fetch_pinned() {
+        local tool="${1:-}" dest="${2:-}"
+        local arch pin url sum
+
+        arch="$(dpkg --print-architecture 2>/dev/null)" || arch=""
+        if ! pin="$(common_pinned_download "$tool" "$arch")"; then
+            warn "No pinned $tool release for architecture ${arch:-unknown}"
+            return 1
+        fi
+        read -r url sum <<<"$pin"
+        common_fetch_verified "$url" "$sum" "$dest"
+    }
+
+    # common_fetch_pinned_binary <tool> <dir>: the <tool> binary from its pinned release archive
+    # (.tar.gz or .zip), checked and extracted to <dir>/<tool> with mode 755.
+    common_fetch_pinned_binary() {
+        local tool="${1:-}" dir="${2:-}"
+        local archive="$2/$1.download"
+        local status=0
+
+        common_fetch_pinned "$tool" "$archive" || return 1
+        case "$(common_pinned_download "$tool" "$(dpkg --print-architecture 2>/dev/null)")" in
+            *.zip\ *) unzip -q -o "$archive" "$tool" -d "$dir" || status=1 ;;
+            *.tar.gz\ *) tar -xzf "$archive" -C "$dir" "$tool" || status=1 ;;
+            *) status=1 ;;
+        esac
+        rm -f "$archive"
+        if [ "$status" -ne 0 ] || ! chmod 755 "$dir/$tool"; then
+            error "Could not extract $tool from its release archive"
+            return 1
+        fi
+    }
+
+    # common_install_starship: the Debian package when the release has one (Debian 13), otherwise
+    # the pinned release binary in /usr/local/bin. Returns 1 when starship could not be installed.
+    common_install_starship() {
+        local tmp_dir status=0
+
+        command -v starship >/dev/null 2>&1 && return 0
+        if common_package_available starship && common_safe_install starship && command -v starship >/dev/null 2>&1; then
+            return 0
+        fi
+
+        common_temp_dir tmp_dir || return 1
+        if ! common_fetch_pinned_binary starship "$tmp_dir" ||
+            ! install -m 755 "$tmp_dir/starship" "${COMMON_STARSHIP_BIN:-/usr/local/bin/starship}"; then
+            status=1
+        fi
+        rm -rf "$tmp_dir"
+        return "$status"
+    }
+
+    # Signing keys of third-party APT repositories pinned in the repository: "<url> <fingerprint>"
+    # of the primary key, as the vendors publish it. Returns 1 for an unknown name.
+    common_apt_key_pin() {
+        case "${1:-}" in
+            docker) printf '%s %s\n' https://download.docker.com/linux/debian/gpg 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ;;
+            nvidia-container-toolkit) printf '%s %s\n' https://nvidia.github.io/libnvidia-container/gpgkey C95B321B61E88C1809C4F759DDCAE044F796ECB0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # common_install_apt_key <name> <keyring>: the signing key <name> of common_apt_key_pin,
+    # accepted only when the downloaded file holds exactly that primary key. A keyring ending in
+    # .asc keeps the armored key; any other name gets the binary form.
+    common_install_apt_key() {
+        local key_name="${1:-}" keyring="${2:-}"
+        local pin url fingerprint tmp_dir actual status=0
+
+        if ! pin="$(common_apt_key_pin "$key_name")" || [ -z "$keyring" ]; then
+            error "No pinned APT key named '$key_name'"
+            return 1
+        fi
+        read -r url fingerprint <<<"$pin"
+
+        common_temp_dir tmp_dir || return 1
+        if ! common_download "$url" "$tmp_dir/key"; then
+            rm -rf "$tmp_dir"
+            warn "Download failed: $url"
+            return 1
+        fi
+        mkdir -m 700 "$tmp_dir/gnupg"
+        actual="$(GNUPGHOME="$tmp_dir/gnupg" gpg --batch --show-keys --with-colons "$tmp_dir/key" 2>/dev/null |
+            awk -F: '$1 == "pub" { primary = 1 } $1 == "fpr" && primary { print $10; primary = 0 }')"
+        if [ "$actual" != "$fingerprint" ]; then
+            rm -rf "$tmp_dir"
+            error "The key at $url has fingerprint ${actual:-none}, expected $fingerprint"
+            return 1
+        fi
+        case "$keyring" in
+            *.asc) cp "$tmp_dir/key" "$tmp_dir/keyring" || status=1 ;;
+            *) GNUPGHOME="$tmp_dir/gnupg" gpg --batch --yes --dearmor -o "$tmp_dir/keyring" "$tmp_dir/key" || status=1 ;;
+        esac
+        if [ "$status" -ne 0 ] || ! install -m 644 "$tmp_dir/keyring" "$keyring"; then
+            rm -rf "$tmp_dir"
+            error "Could not write the APT key $keyring"
+            return 1
+        fi
+        rm -rf "$tmp_dir"
+    }
+fi
+
 TARGET_USER=""
 ADDUSER_BIN="/usr/sbin/adduser"
 SSH_HARDENING_DROPIN="/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf"
@@ -1101,10 +1307,11 @@ install_docker_ce() {
 
     install -m 0755 -d "$(dirname "$DOCKER_KEYRING")"
 
-    if [ ! -f "$DOCKER_KEYRING" ]; then
-        progress "Installing Docker APT key"
-        curl -fsSL "https://download.docker.com/linux/${ID}/gpg" | gpg --dearmor -o "$DOCKER_KEYRING"
-        chmod a+r "$DOCKER_KEYRING"
+    # The key is fetched on every run and accepted only with its pinned fingerprint.
+    progress "Installing Docker APT key"
+    if ! common_install_apt_key docker "$DOCKER_KEYRING"; then
+        error "The Docker APT key could not be installed"
+        return 1
     fi
     DOCKER_ARCH="$(dpkg --print-architecture)"
 
@@ -1173,15 +1380,11 @@ install_fish_and_starship() {
 
     if ! command -v starship >/dev/null 2>&1; then
         progress "Installing Starship prompt"
-        if common_package_available starship; then
-            common_safe_install starship || warn "Starship package installation failed, trying the official installer"
-        fi
-        if ! command -v starship >/dev/null 2>&1; then
-            if curl -fsSL https://starship.rs/install.sh | sh -s -- -y >/dev/null 2>&1; then
-                log "Starship binary installed successfully via official installer"
-            else
-                warn "Could not install Starship automatically"
-            fi
+        # The Debian package (Debian 13) or the pinned release checked by its SHA-256
+        if common_install_starship; then
+            log "Starship installed"
+        else
+            warn "Could not install Starship automatically"
         fi
     else
         log "Starship is already installed"
