@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 320" width="1280" height="320" role="img" aria-labelledby="t d">
+  <title id="t">optimize-debian: настройка Debian 12/13 одной командой (темная тема)</title>
+  <desc id="d">Заголовок optimize-debian, подзаголовок «Настройка Debian 12/13 одной командой», метки VPS, AmneziaVPN, мини-ПК, WSL2 и обновление Debian 11/12 до 13. Справа окно терминала с проверками: sshd -T, visudo -cf, SHA-256 загрузок, sysctl BBR + fq.</desc>
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .title { font-size: 64px; font-weight: 700; fill: #E6EDF3; }
+    .sub { font-size: 28px; fill: #E6EDF3; }
+    .tags { font-size: 24px; fill: #9DA7B3; }
+    .line { font-size: 24px; fill: #E6EDF3; }
+    .ok { fill: #FF4D6D; }
+  </style>
+  <rect width="1280" height="320" fill="#0D1117"/>
+  <rect x="64" y="56" width="96" height="6" rx="3" fill="#FF4D6D"/>
+  <text class="mono title" x="64" y="124">optimize<tspan fill="#FF4D6D">-</tspan>debian</text>
+  <text class="sans sub" x="64" y="178">Настройка Debian 12/13 одной командой</text>
+  <text class="sans tags" x="64" y="228">VPS · AmneziaVPN · мини-ПК · WSL2</text>
+  <text class="sans tags" x="64" y="264">обновление Debian 11/12 до 13</text>
+  <rect x="776" y="48" width="440" height="224" rx="14" fill="#161B22" stroke="#30363D" stroke-width="2"/>
+  <circle cx="804" cy="72" r="7" fill="#FF4D6D"/>
+  <circle cx="830" cy="72" r="7" fill="#9DA7B3"/>
+  <circle cx="856" cy="72" r="7" fill="#9DA7B3"/>
+  <line x1="777" y1="96" x2="1215" y2="96" stroke="#30363D" stroke-width="2"/>
+  <text class="mono line" x="800" y="136"><tspan class="ok">✓</tspan> sshd -T: закалка сверена</text>
+  <text class="mono line" x="800" y="174"><tspan class="ok">✓</tspan> sudoers: visudo -cf</text>
+  <text class="mono line" x="800" y="212"><tspan class="ok">✓</tspan> загрузки: SHA-256</text>
+  <text class="mono line" x="800" y="250"><tspan class="ok">✓</tspan> sysctl: BBR + fq</text>
+</svg>

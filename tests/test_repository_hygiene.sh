@@ -134,6 +134,19 @@ test_optimizer_visual_shell_uses_clean_style() {
         fail "optimize_wsl2.sh should use styled success titles"
 }
 
+# The table "Какой скрипт выбрать" in README.md names the version each script reports.
+test_readme_lists_script_versions() {
+    local script version
+
+    for script in optimize_vps.sh optimize_amnezia_host.sh optimize_mini_pc.sh optimize_wsl2.sh upgrade-to-debian13.sh; do
+        version="$(sed -nE 's/^(readonly )?SCRIPT_VERSION="([^"]+)"$/\2/p' "$ROOT_DIR/$script")"
+        [ -n "$version" ] || fail "$script must set SCRIPT_VERSION"
+        grep -Fq -- "| \`$script\` |" "$ROOT_DIR/README.md" || fail "README.md must list $script"
+        grep -F -- "| \`$script\` |" "$ROOT_DIR/README.md" | grep -Fq -- "| $version |" ||
+            fail "README.md must give $script the version $version"
+    done
+}
+
 main() {
     test_no_crlf_in_shell_or_docs
     test_no_trailing_whitespace
@@ -142,6 +155,7 @@ main() {
     test_optimizer_scripts_source_from_process_substitution
     test_embedded_tui_auto_backend_matches_gum_style
     test_optimizer_visual_shell_uses_clean_style
+    test_readme_lists_script_versions
     printf 'tests/test_repository_hygiene.sh: OK\n'
 }
 
