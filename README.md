@@ -141,6 +141,8 @@
 
 `curl -fsSL` останавливается на ошибке HTTP, а шаги `optimize_vps.sh`, `optimize_mini_pc.sh` и `optimize_wsl2.sh` начинаются только после того, как скрипт загружен целиком: оборванная загрузка ничего не меняет. `bash <скрипт> --help` печатает справку без root и без изменений.
 
+Команды ниже запускают текущую версию из `main`. Чтобы запустить закрепленный выпуск, замените в адресе `main` на его тег (см. [Версии и выпуски](#версии-и-выпуски)).
+
 ### Для VPS:
 ```bash
 # Быстрый запуск (bash + curl)
@@ -419,19 +421,27 @@ for test in tests/*.sh; do bash "$test" || echo "FAIL: $test"; done
 
 Внутренние helper'ы лежат в `lib/common.sh` и `lib/tui.sh`. TUI сделан в стиле `arch-linux-installer.sh`: основной backend — Charmbracelet `gum`, при необходимости он подтягивается автоматически с проверкой checksum; если `gum` недоступен, используется plain Bash prompt. `dialog`/`whiptail` не выбираются автоматически и доступны только через явный `TUI_BACKEND=dialog|whiptail`. Docker deb822 sources рендерятся через общий helper с `Architectures: $(dpkg --print-architecture)`.
 
+### Версии и выпуски
+
+- `main` — текущая версия. В него попадают только PR, прошедшие проверку `checks`, и команды этого README запускают именно его.
+- Выпуск — снимок всех скриптов с тегом `vГГГГ.ММ.ДД` (второй выпуск за день — `vГГГГ.ММ.ДД.1`) и списком изменений на странице [Releases](https://github.com/snaplyze/optimize-debian/releases). Выпуски неизменяемы, а теги `v*` нельзя перенести или удалить, поэтому команда с тегом всегда запускает один и тот же код.
+- Если версия из `main` повела себя не так, запустите предыдущий выпуск: замените `main` в адресе на его тег.
+
+```bash
+TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
+bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_vps.sh")
+```
+
+Версии в заголовках скриптов (например, VPS v3.0.0) относятся к отдельному скрипту, а тег выпуска — ко всему репозиторию.
+
 ### Обновление:
 ```bash
-# Amnezia Host
-wget -O optimize_amnezia_host.sh https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh
-
-# VPS
-wget -O optimize_vps.sh https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh
-
-# WSL2
-wget -O optimize_wsl2.sh https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh
-
-# Debian 11/12 -> 13 upgrade
-wget -O upgrade-to-debian13.sh https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh
+# Текущая версия из main; чтобы скачать выпуск, замените main на его тег
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_wsl2.sh
+curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh
 ```
 
 ---
@@ -449,6 +459,13 @@ MIT License - свободное использование и модифика�
 ---
 
 ## 📝 История изменений
+
+### Выпуск v2026.10.21 - 2026-10-21
+Первый закрепленный выпуск всего репозитория ([Releases](https://github.com/snaplyze/optimize-debian/releases/tag/v2026.10.21)), после аудита 2026-10-20 (`docs/plan.md`):
+- 🔒 SSH-закалка VPS, мини-ПК и Amnezia в drop-in `00-*.conf` со сверкой через `sshd -T`; закрепленные версии и SHA-256 для Starship, fnm, Go, gum и `cuda-keyring`, отпечатки ключей Docker и NVIDIA; атомарный sudoers
+- 🛡️ Шаги начинаются только после полной загрузки скрипта; `--help` без root; повторный запуск не плодит конфигурацию и не пересоздает swap нужного размера
+- ⬆️ `upgrade-to-debian13.sh`: источники старого релиза убираются, бэкап проверяется, порты SSH и права файлов сохраняются
+- 📚 Значения в документах приведены к коду; CI — обязательная проверка `checks` для `main`
 
 ### Amnezia Host Baseline v0.3.0 (Текущая) - 2026-09-04
 - ⚡ **10 Gbps сетевой стек:** BBR, fq pacing, адаптивные BDP буферы (32–64MB), очереди пакетов (`netdev_max_backlog=32768`, `somaxconn=32768`), conntrack до 262k соединений, ulimits по nofile до 524k
