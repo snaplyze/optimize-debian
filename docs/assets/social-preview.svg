@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d">
+  <title id="t">optimize-debian: настройка Debian 12/13 одной командой</title>
+  <desc id="d">Заголовок optimize-debian, подзаголовок «Настройка Debian 12/13 одной командой», метки VPS, AmneziaVPN, мини-ПК, WSL2 и обновление Debian 11/12 до 13. Ниже окно терминала с проверками: sshd -T, visudo -cf, SHA-256 загрузок, sysctl BBR + fq.</desc>
+  <style>
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+    .sans { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .title { font-size: 84px; font-weight: 700; fill: #E6EDF3; }
+    .sub { font-size: 36px; fill: #E6EDF3; }
+    .tags { font-size: 30px; fill: #9DA7B3; }
+    .line { font-size: 28px; fill: #E6EDF3; }
+    .ok { fill: #FF4D6D; }
+  </style>
+  <rect width="1280" height="640" fill="#0D1117"/>
+  <rect x="592" y="64" width="96" height="6" rx="3" fill="#FF4D6D"/>
+  <text class="mono title" x="640" y="160" text-anchor="middle">optimize<tspan fill="#FF4D6D">-</tspan>debian</text>
+  <text class="sans sub" x="640" y="222" text-anchor="middle">Настройка Debian 12/13 одной командой</text>
+  <text class="sans tags" x="640" y="276" text-anchor="middle">VPS · AmneziaVPN · мини-ПК · WSL2 · обновление Debian 11/12 до 13</text>
+  <rect x="280" y="324" width="720" height="268" rx="16" fill="#161B22" stroke="#30363D" stroke-width="2"/>
+  <circle cx="312" cy="352" r="8" fill="#FF4D6D"/>
+  <circle cx="340" cy="352" r="8" fill="#9DA7B3"/>
+  <circle cx="368" cy="352" r="8" fill="#9DA7B3"/>
+  <line x1="281" y1="380" x2="999" y2="380" stroke="#30363D" stroke-width="2"/>
+  <text class="mono line" x="312" y="426"><tspan class="ok">✓</tspan> sshd -T: закалка сверена</text>
+  <text class="mono line" x="312" y="470"><tspan class="ok">✓</tspan> sudoers: visudo -cf</text>
+  <text class="mono line" x="312" y="514"><tspan class="ok">✓</tspan> загрузки: SHA-256</text>
+  <text class="mono line" x="312" y="558"><tspan class="ok">✓</tspan> sysctl: BBR + fq</text>
+</svg>

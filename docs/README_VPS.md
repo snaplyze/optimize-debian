@@ -1,57 +1,52 @@
-# VPS Optimization Script for Debian 12/13
+# Оптимизация VPS
 
-Комплексный скрипт оптимизации VPS серверов на базе **Debian 12 (Bookworm)** и **Debian 13 (Trixie)** с Debian Backports kernel, Fish + Starship, Go, Node.js/fnm, Docker, 10G sysctl и усиленной безопасностью.
+[README](../README.md) · [Вся документация](README.md)
 
-**🆕 Версия 3.0.0** - **Debian Backports kernel**, **Fish + Starship** (`nerd-font-symbols`), **10G sysctl** (до 64MB буферы), Fail2Ban с `python3-systemd`, persistent modules.
-**📦 Версия 2.3.0** - Debian 12/13 support, fnm, deb822-aware APT enrichment, `linux-cpupower`.
-**📦 Версия 2.2.0** - Zsh Ultra-Fast (архив)
+`optimize_vps.sh` настраивает VPS на Debian 12 или 13 под VPN-нагрузку: ядро из Debian Backports (на Debian 12), sysctl под каналы до 10 Гбит/с, Fish + Starship, Go, Node.js через fnm, Docker, закалка SSH, Fail2Ban и UFW. Документ для администратора, который запускает скрипт от root на целевой машине.
 
-## 🎯 Ключевые особенности
+| Скрипт | Версия | Debian | Права | Лог |
+|---|---|---|---|---|
+| `optimize_vps.sh` | 3.0.0 (`SCRIPT_VERSION`, печатает `--help`); закрепленный выпуск репозитория — `v2026.10.21` (см. [Версии и выпуски](../README.md#версии-и-выпуски)) | 12 (bookworm) или 13 (trixie); на других версиях скрипт завершается с кодом 1 | root (`EUID` 0), иначе код 1 | `/var/log/vps_optimization.log` — сообщения скрипта и вывод apt |
 
-### 🚀 Debian Backports Kernel
-- **Официальный репозиторий** - `bookworm-backports` на Debian 12 обеспечивает установку самого свежего официального стабильного LTS ядра Debian; если ядро и заголовки не установились из `bookworm-backports`, скрипт останавливается с ошибкой, а не сообщает об успехе
-- **Мультиархитектурность** - полная поддержка x86_64 (`amd64`) и ARM64 (`arm64`)
-- **Стабильность и безопасность** - ядро подписано официальными ключами Debian, совместимо со всеми модулями (WireGuard, TUN/TAP, BBR)
-- **Debian 13** - использует современное upstream ядро из основного репозитория
+> [!WARNING]
+> Скрипт меняет ядро, пользователей, sudoers, SSH, firewall и sysctl. Запускайте его только на целевой машине и только от root. Перед запуском сделайте снимок (snapshot) VPS: полного отката одной командой нет. Не запускайте его на рабочей станции ни от root, ни через sudo. `--help` работает без root и ничего не меняет.
 
-### 🐟 Fish Shell + Starship Prompt
-- **Fish shell** - современный дружелюбный шелл из коробки: умные автодополнения, подсветка синтаксиса, быстрый поиск по истории
-- **Starship Prompt** - единый быстрый промпт с пресетом `nerd-font-symbols`
-- **fnm hook** - нативная интеграция Fast Node Manager (`fnm env --use-on-cd --shell fish`)
-- **Гибридный запуск** - пользовательский шелл в `/etc/passwd` остаётся стандартным `/bin/bash` для 100% совместимости с SSH-скриптами, scp/rsync, cron и автоматизацией; интерактивные сессии прозрачно запускают Fish через `~/.bashrc`
-- **Системные алиасы** - Docker, Git, мониторинг, навигация
+## Содержание
 
-### ⚡ 10 Gbps Networking & VPN Tuning
-- **BBR & fq** - алгоритм контроля перегрузок BBR с планировщиком `fq`
-- **Адаптивные буферы** - до 64MB TCP/UDP буферы (`rmem_max=67108864`) для максимального BDP на 10G каналах
-- **Сетевые очереди** - `netdev_max_backlog = 32768`, `somaxconn = 32768`
-- **Persistent Modules** - автозагрузка `tcp_bbr`, `tun`, `wireguard` через `/etc/modules-load.d/`
-- **VPN Routing** - UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"` и IP forwarding
+- [Для чего](#для-чего)
+- [Требования](#требования)
+- [Быстрый старт](#быстрый-старт)
+- [Параметры запуска](#параметры-запуска)
+- [Что делает скрипт](#что-делает-скрипт)
+- [Файлы, которые пишет скрипт](#файлы-которые-пишет-скрипт)
+- [Проверка после запуска](#проверка-после-запуска)
+- [Повторный запуск и откат](#повторный-запуск-и-откат)
+- [Решение проблем](#решение-проблем)
+- [См. также](#см-также)
 
-### 🐹 Go язык программирования
-- **Закрепленная версия** - Go 1.27.3, архив сверяется с SHA-256, записанной в скрипте
-- **Архитектура** - amd64 и arm64
-- **PATH конфигурация** - сразу готово к использованию
+## Для чего
 
-### ⬢ Node.js с fnm
-- **Fast Node Manager (fnm)** - быстрый нативный менеджер версий Node.js
-- Автоматическая установка последней LTS версии для root и целевого пользователя
-- `corepack enable` для pnpm/yarn, где доступно
+Скрипт собирает из чистого Debian сервер для VPN и контейнеров с одним пользователем-администратором:
 
-## 📋 Системные требования
+- Ядро: на Debian 12 — `linux-image-<arch>` и `linux-headers-<arch>` из `bookworm-backports` (свежее официальное ядро Debian с WireGuard, BBR, TUN/TAP); на Debian 13 — те же пакеты из основного репозитория. Архитектуры `amd64` и `arm64`.
+- Сеть: BBR с планировщиком `fq`, буферы до 64 MB (32 MB при RAM меньше 3 GB), очереди 32768, conntrack 262144, `ip_forward = 1`, loose `rp_filter = 2` для асимметричной маршрутизации WireGuard, AmneziaWG, OpenVPN и мостов Docker. Модули `tcp_bbr`, `tun`, `wireguard` загружаются при старте.
+- Безопасность: пользователь с ключом SSH и sudo без пароля, вход root и вход по паролю выключены, UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"` для VPN, Fail2Ban с `backend = systemd`, автоматические обновления безопасности.
+- Инструменты: Fish + Starship (пресет `nerd-font-symbols`), Go 1.27.3, fnm 1.39.0 с Node.js LTS, Docker CE с Compose и Buildx, набор утилит (`htop`, `fzf`, `ripgrep`, `bat`, `fd-find`, `tmux`, `cmake`, `gcc`).
+- Оболочка: в `/etc/passwd` у пользователя остается `/bin/bash`, чтобы `scp`, `rsync`, cron и неинтерактивные команды SSH работали как прежде; интерактивная сессия переходит в Fish через `~/.bashrc`.
 
-- **ОС:** **Debian 12 (Bookworm)** или **Debian 13 (Trixie)**
-- **Архитектура:** x86_64 (amd64) или ARM64 (arm64)
-- **Права:** root/sudo доступ
-- **Память:** Минимум 2GB RAM (рекомендуется 4GB+)
-- **Хранилище:** Минимум 10GB свободного места
-- **Сеть:** Интернет соединение для загрузки пакетов
+## Требования
 
-> Если сервер ещё на Debian 11, сначала выполните [`upgrade-to-debian13.sh`](README_UPGRADE.md). На Debian 12 и Debian 13 `optimize_vps.sh` можно запускать напрямую.
+- Debian 12 (bookworm) или Debian 13 (trixie): скрипт читает `/etc/os-release` и останавливается на любой другой версии. Сервер на Debian 11 сначала обновите скриптом [`upgrade-to-debian13.sh`](README_UPGRADE.md).
+- Архитектура `amd64` или `arm64`: для них закреплены ядро, Go, fnm, Starship и gum. На другой архитектуре загрузки Go и fnm не выполняются.
+- Доступ root и рабочий SSH: скрипт просит открыть второй терминал и проверить вход новым пользователем до закалки SSH.
+- Публичный ключ SSH (`id_ed25519.pub` или `id_rsa.pub`): без ключа скрипт завершается, пароль по SSH после закалки не работает.
+- Интернет: `deb.debian.org`, `download.docker.com`, `dl.google.com`, `github.com` (Starship, fnm, gum).
+- Память: код объем RAM не проверяет; sysctl и лимиты рассчитаны на 1-4 GB, размер swap и буферов выбирается по RAM (см. [Что делает скрипт](#что-делает-скрипт)). Место на диске: swap-файл размером до 2 × RAM плюс пакеты.
 
-## 🛠️ Установка и использование
+## Быстрый старт
 
-### Быстрый запуск
+Текущая версия из `main`:
+
 ```bash
 # Быстрый запуск (bash + curl)
 bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
@@ -62,590 +57,310 @@ chmod +x optimize_vps.sh
 sudo ./optimize_vps.sh
 ```
 
-### Подготовка системы
+Закрепленный выпуск (см. [Версии и выпуски](../README.md#версии-и-выпуски)):
+
 ```bash
-# Обновите систему
-sudo apt update && sudo apt upgrade -y
-
-# Проверьте архитектуру
-uname -m
-# Должно быть x86_64
-
-# Проверьте версию ОС
-lsb_release -a
+TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
+bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_vps.sh")
 ```
 
-## 🎯 Компоненты оптимизации
+Все шаги идут из функции `optimize_main`, которую вызывает последняя строка файла: оборванная загрузка останавливается на синтаксической ошибке и ничего не меняет. Перед запуском полезно обновить систему (`apt update && apt upgrade -y`) и посмотреть `uname -m` и `lsb_release -a`.
 
-### Системная конфигурация
-- ✅ Обновление системы до последней версии
-- ✅ Удаление ненужных пакетов
-- ✅ Настройка репозиториев
-- ✅ Создание пользователя с sudo без пароля: `NOPASSWD:ALL` в `/etc/sudoers.d/<user>`, для `root` — в `/etc/sudoers.d/root`
-- ✅ Генерация обеих локалей `ru_RU.UTF-8` и `en_US.UTF-8` для SSH; меню выбирает язык по умолчанию. `update-locale` использует штатный файл Debian 12/13, постоянный `LC_ALL` не задаётся. [Исправление на уже настроенном сервере](README_AMNEZIA_HOST.md#ошибка-setlocale-при-входе-по-ssh).
-- ✅ Настройка часового пояса
-- ✅ Проверка существующего NTP daemon и fallback на `systemd-timesyncd`
-- ✅ Диагностика после auto-enrichment APT sources
+> [!TIP]
+> Запускайте скрипт в `tmux` или `screen`: он задает вопросы, ставит ядро и перезапускает sshd, а обрыв сессии посреди шага оставит систему настроенной наполовину.
 
-### Ядро и производительность
-- ✅ Debian Backports kernel (`bookworm-backports`) для Debian 12 / Mainline для Debian 13
-- ✅ 10G sysctl оптимизация (BBR, fq, буферы до 64MB, очереди 32k)
-- ✅ Persistent modules (`/etc/modules-load.d/99-vps-modules.conf` с `tcp_bbr`, `tun`, `wireguard`)
-- ✅ I/O планировщики (SSD/NVMe)
-- ✅ Управление памятью (swappiness)
-- ✅ Увеличение лимитов файлов
+## Параметры запуска
 
-### Безопасность
-- ✅ SSH hardening (только ключи, отключение root)
-- ✅ Fail2Ban настройка (с `backend = systemd` через `python3-systemd`)
-- ✅ UFW firewall с `DEFAULT_FORWARD_POLICY="ACCEPT"` для VPN
-- ✅ Автоматические обновления безопасности
-- ✅ Настройка логирования
+Аргументы:
 
-### Разработка
-- ✅ Fish + Starship конфигурация (пресет `nerd-font-symbols`)
-- ✅ Гибридный запуск (сохраняет `/bin/bash` в `/etc/passwd`, auto-switch в `~/.bashrc`)
-- ✅ Go (закрепленная версия с проверкой SHA-256 из скрипта)
-- ✅ Node.js + fnm (LTS с управлением версиями через `fnm env --shell fish`)
-- ✅ Базовые утилиты (git, curl, htop, fzf, bat, cmake, gcc)
-- ✅ SSH agent конфигурация
-- ✅ Настройка окружения
+| Аргумент | Действие |
+|---|---|
+| `-h`, `--help` | печатает справку и выходит с кодом 0, без root и без изменений |
+| без аргументов | обычный запуск |
+| любой другой | `Unknown argument: ...`, справка в stderr, код 2 |
 
-### Контейнеризация
-- ✅ Docker CE установка
-- ✅ Docker Compose plugin
-- ✅ Docker deb822 source с `Architectures: $(dpkg --print-architecture)`
-- ✅ Оптимизация daemon.json
-- ✅ Настройка сетей и пулов адресов
+Вопросы интерактивного меню (в порядке появления):
 
-### Интерфейс запуска
-- ✅ Визуальные элементы используют Charmbracelet `gum` в стиле `arch-linux-installer.sh`
-- ✅ Если `gum` недоступен, используется plain Bash fallback; `dialog`/`whiptail` не выбираются автоматически
-- ✅ Общие renderer/helper-функции вынесены в `lib/common.sh` и `lib/tui.sh`
+| Вопрос | Умолчание и проверка |
+|---|---|
+| `Enter new username` | обязателен; строчные буквы, цифры, `_`, `-`; не начинается с цифры или `-`; не только цифры; до 32 символов; при ошибке вопрос повторяется |
+| `Do you want to change password for existing user ...? (y/N)` | только для существующего пользователя; `N` |
+| `passwd` для нового пользователя | при ошибке `Retry? (Y/n)` |
+| `SSH Public Key` | обязателен; пустой ключ — код 1 |
+| `Press Enter once you've verified SSH access works...` | пауза для проверки входа во втором терминале |
+| `Default Locale` (1 `en_US.UTF-8`, 2 `ru_RU.UTF-8`, 3 обе с английским по умолчанию) | 1; неверный ввод — `en_US.UTF-8`; обе локали генерируются всегда |
+| `Enter new hostname` | Enter — оставить текущее; имя проверяется по шаблону `[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?` |
+| `Enter timezone` | Enter — оставить текущий; имя должно существовать в `/usr/share/zoneinfo` |
+| `Do you want to reboot now? (y/N)` | `N`; при `y` перезагрузка через 5 секунд |
 
-## 🎨 Fish + Starship особенности
+Переменные окружения, которые читает код:
 
-### Преимущества Fish
-- **Автодополнения из коробки** - умный автокомплит по истории и man-страницам без сторонних плагинов
-- **Подсветка синтаксиса** - нативная подсветка команд и путей в реальном времени
-- **Высокая скорость** - мгновенный запуск без компиляции rc-файлов
-- **Starship пресет** - единый официальный пресет `nerd-font-symbols`
-- **Совместимость** - шелл пользователя в `/etc/passwd` остаётся `/bin/bash`; авто-переключение в Fish происходит только в интерактивных сессиях
+| Переменная | Значение |
+|---|---|
+| `TUI_BACKEND` | `auto` (умолчание), `gum`, `plain`, `dialog`, `whiptail`. В `auto` используется `gum`, если он есть или его удалось установить; иначе обычные запросы `read`. `dialog` и `whiptail` сами не выбираются. Другое значение — инициализация TUI завершается ошибкой, и меню идет через `read` |
+| `TUI_AUTO_INSTALL_GUM` | `true` (умолчание); `false` — gum не скачивается |
+| `GUM`, `TUI_GUM_VERSION` | путь к gum (`/usr/local/bin/gum`) и версия (`0.17.0`); для другой версии нет закрепленной SHA-256, и она не ставится |
+| `COMMON_DOWNLOAD_CONNECT_TIMEOUT`, `COMMON_DOWNLOAD_MAX_TIME`, `COMMON_DOWNLOAD_RETRIES` | таймауты curl для загрузок Starship, Go и fnm: 20 с, 900 с, 3 попытки |
+| `OPTIMIZE_SOURCE_ONLY=1` | файл только подключается (`source`) без запуска `optimize_main`; нужно тестам |
 
-### Starship prompt
-- 🌱 Git статус и ветка
-- 🐋 Docker контекст
-- 🐍 Python, ⬢ Node.js, 🐹 Go, 🦀 Rust версии
-- ⏰ Время выполнения команд
-- 💾 Использование памяти и диска
+Таймауты APT (`COMMON_APT_LOCK_TIMEOUT=300`, `COMMON_APT_UPDATE_ATTEMPTS=30`) заданы в скрипте и из окружения не читаются. Скрипт сам выставляет `LC_ALL=C` и `LANG=C` на время работы.
 
-### Алиасы
-```bash
-# Docker
-d='docker'
-dc='docker compose'
-dps='docker ps'
-dcl='docker compose logs -f'
+## Что делает скрипт
 
-# Git
-g='git'
-gs='git status'
-gcm='git commit -m'
-gl='git log --oneline --graph'
+Шаги в порядке исполнения `optimize_main`. Шаги с пометкой «стоп» завершают скрипт с кодом 1 при ошибке.
 
-# Система
-ll='ls -alFh'
-update='sudo apt update && sudo apt upgrade -y'
-meminfo='free -h'
-diskinfo='df -h'
+```mermaid
+flowchart LR
+    A["Проверки: аргументы, root, Debian 12/13"] --> B["Пользователь, sudo, ключ SSH"]
+    B --> C["Локаль, hostname, часовой пояс, NTP"]
+    C --> D["Fish, Starship, Bash, Go, fnm"]
+    D --> E["Обновление, пакеты, ядро, Docker"]
+    E --> F["sysctl, swap, UFW, Fail2Ban, лимиты"]
+    F --> G["Закалка SSH, tmpfs, udev, governor, утилиты"]
+    G --> H["Итог и предложение перезагрузки"]
 ```
 
-## 🐹 Go программирование
+1. **Проверки.** Разбор аргумента, проверка `EUID`, `tui_init` (gum 0.17.0 скачивается с проверкой SHA-256 в `/usr/local/bin/gum`: в `auto` только при выводе в терминал, при `TUI_BACKEND=gum` всегда). Чтение `/etc/os-release`: не Debian или не 12/13 — стоп. Если установлен `cloud-init`, есть `/etc/network/interfaces.d/50-cloud-init` и `/etc/network/interfaces` сам описывает интерфейсы кроме `lo`, скрипт пишет `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` (`network: {config: disabled}`) и переименовывает `50-cloud-init` в `50-cloud-init.disabled-by-optimize.<дата>-<ЧЧММСС>`, чтобы после перезагрузки не было двух DHCP-клиентов.
+2. **Пользователь и SSH-ключ.** Имя проверяется в цикле. Существующий пользователь остается, добавляется в группу `sudo`, пароль меняется по желанию. Новый создается `adduser --disabled-password`, добавляется в `sudo`, пароль задается `passwd`. Sudo без пароля: `/etc/sudoers.d/<user>` с `<user> ALL=(ALL) NOPASSWD:ALL` и `/etc/sudoers.d/root` (если в нем еще нет такой строки) — оба через `common_safe_write_sudoers`: содержимое пишется во временный файл в том же каталоге, проверяется `visudo -cf` и только потом переименовывается; при ошибке прежний файл не меняется. Ключ дописывается в `~/.ssh/authorized_keys` (каталог `700`, файл `600`), если такой строки там еще нет. Дальше пауза: проверьте `ssh <user>@<ip>` во втором терминале.
+3. **Локализация.** Ставится `locales`, в `/etc/locale.gen` включаются `en_US.UTF-8` и `ru_RU.UTF-8`, `locale-gen --keep-existing`, наличие обеих локалей проверяется через `locale -a`. Выбранная локаль записывается `update-locale --reset LANG=... LANGUAGE=...` (штатный файл Debian: `/etc/default/locale` на 12, `/etc/locale.conf` на 13) и в `/etc/profile.d/locale.sh`; постоянный `LC_ALL` не задается. Hostname: `hostnamectl set-hostname` и строка `127.0.1.1` в `/etc/hosts`. Часовой пояс: `timedatectl set-timezone`, при неудаче символьная ссылка `/etc/localtime` и `/etc/timezone`. Синхронизация времени (`common_enable_time_sync`): остается первый установленный из `chrony`, `ntpsec`, `ntp`, `openntpd`, `systemd-timesyncd`; `systemd-timesyncd` ставится только если нет ни одного; затем `timedatectl set-ntp true`. Ошибка этого шага не останавливает скрипт.
+4. **Fish и Starship.** Пакеты `fish`, `git`, `curl`. Starship: пакет Debian, если он есть в репозитории (Debian 13), иначе закрепленный релиз 1.27.0 с проверкой SHA-256 в `/usr/local/bin/starship`. Для root и пользователя: `~/.config/starship.toml` (`starship preset nerd-font-symbols`) и `~/.config/fish/config.fish` профиля `vps`: пустое приветствие, `/usr/local/go/bin`, `~/go/bin` и `/usr/sbin` в PATH, хук `fnm env --use-on-cd --shell fish` (если `fnm` найден в PATH), алиасы и `starship init fish` в интерактивной сессии. Нет бинарника `fish` — стоп.
+5. **Bash.** Пакет `bash-completion`. `~/.bashrc` профиля `vps` для root и пользователя: первым блоком `exec fish` для интерактивной сессии без `SSH_ORIGINAL_COMMAND`, история 50000 записей, `EDITOR=vim`, Starship для Bash, те же алиасы, функции `mkcd` и `extract`, блок fnm, блок Go, защитные алиасы `rm -i`, `cp -i`, `mv -i`. Чужой `.bashrc` (без заголовка профиля) перед заменой копируется в `~/.bashrc.backup.<время>.<суффикс>`; `.bashrc`, написанный этим скриптом, заменяется без новой копии.
+6. **Go.** Закрепленный `go1.27.3` для `amd64` или `arm64` с `dl.google.com`: архив сверяется с SHA-256 из скрипта, распаковывается рядом с `/usr/local/go`, и только потом прежний каталог заменяется. `/etc/profile.d/golang.sh` с `GOROOT=/usr/local/go`, `GOPATH=$HOME/go` и PATH. Блок Go дописывается в `~/.bashrc`, только если там нет `GOROOT` (в `.bashrc` профиля он уже есть). Ошибка — стоп.
+7. **Node.js через fnm.** Нужны `curl` и `unzip`: недостающие скрипт сначала ставит и пропускает шаг с предупреждением, только если они так и не появились. Бинарник fnm 1.39.0 из релиза GitHub с проверкой SHA-256 ставится в `~/.local/share/fnm/fnm` для root и для пользователя (под его учетной записью через `su -`), затем `fnm install --lts --use`, `fnm default`, `corepack enable`, если он есть. В `~/.bashrc` блок fnm добавляется, только если там нет `FNM_PATH`. Старые NVM-настройки не мигрируются. Ошибка — предупреждение, скрипт продолжается.
+8. **RAM и размер swap.** Ставится `bc`. RAM меньше 3 GB: swap = 2 × RAM, `vm.swappiness = 60`; иначе swap = RAM / 2, `vm.swappiness = 10`. В обеих ветках результат округляется до целого числа GB (`printf %.0f` от `x + 0.5`): 3.9 GB RAM дает 2 GB swap.
+9. **Обновление и пакеты.** `apt-get update` и `upgrade -y`. Во все источники APT (`sources.list`, `*.list`, `*.sources`) с компонентом `main` добавляются `contrib`, `non-free`, `non-free-firmware`; файл переписывается только если что-то добавлено; сломанный после этого индекс — стоп. Пакеты: `wget curl git htop iotop sysstat net-tools iptables ufw irqbalance fail2ban python3-systemd unattended-upgrades apt-listchanges needrestart ncdu tree vim nano tmux zip unzip gnupg ca-certificates lsb-release cmake make gcc g++ python3-venv fzf ripgrep fd-find bat xz-utils xdg-user-dirs`; недоступный пакет дает предупреждение. `iptables`, `ip6tables`, `iptables-save`, `ip6tables-save` переключаются на `legacy` через `update-alternatives` (до включения UFW). Ссылки `/usr/bin/bat -> batcat` и `/usr/bin/fd -> fdfind`, если имен `bat` и `fd` нет.
+10. **Ядро.** Удаляются источник и ключ XanMod прежних версий. Debian 12: `/etc/apt/sources.list.d/debian-backports.sources` (deb822, `bookworm-backports`, `Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg`), `apt-get install -t bookworm-backports linux-image-<arch> linux-headers-<arch>`; если после установки версии пакетов не из backports — стоп. Debian 13: те же пакеты из основного репозитория; не установились — стоп.
+11. **Docker.** Удаляются `docker.io docker-doc docker-compose podman-docker containerd runc`. Ключ Docker принимается только с закрепленным отпечатком `9DC858229FC7DD38854AE2D88D81803C0EBFCD88` в `/etc/apt/keyrings/docker.gpg`; источник `/etc/apt/sources.list.d/docker.sources` (deb822, `Architectures: $(dpkg --print-architecture)`); пакеты `docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` (ошибка — стоп). `/etc/docker/daemon.json`: `json-file` с `max-size 10m` и `max-file 3`, `overlay2`, BuildKit; `default-address-pools` и `default-ulimits` не задаются. Drop-in `docker.service.d/override.conf` заменяет `ExecStart` на `/usr/bin/dockerd -H unix:///var/run/docker.sock` (socket activation). Перед стартом завершаются старые `dockerd` (`pkill -9`), включаются `docker` и `docker.socket`, сокет получает `root:docker` и `660`, пользователь добавляется в группу `docker`.
+12. **sysctl и модули.** Если нет `/etc/sysctl.conf`, он создается; копия `/etc/sysctl.conf.backup.<дата>`. Буферы по RAM: при `free -m` меньше 3000 MB — `rmem_max`/`wmem_max` 33554432 и `rmem_default`/`wmem_default` 1048576, иначе 67108864 и 2097152. `/etc/modules-load.d/99-vps-modules.conf` (`tcp_bbr`, `tun`, `wireguard`) и `modprobe` сразу. `/etc/sysctl.d/99-vps-optimization.conf` применяется `sysctl -e -p`; параметры, которых нет в ядре, пропускаются.
 
-### Установка
-- Закрепленная версия Go 1.27.3 (amd64, arm64) с `dl.google.com`
-- Архив сверяется с SHA-256, записанной в скрипте; прежняя установка заменяется только после проверки и распаковки
-- Установка в `/usr/local/go`
-- Автоматическая конфигурация PATH
+    <details>
+    <summary>Значения /etc/sysctl.d/99-vps-optimization.conf</summary>
 
-### Использование
+    | Параметр | Значение |
+    |---|---|
+    | `net.core.rmem_default`, `net.core.wmem_default` | 2097152 (1048576 при RAM < 3000 MB) |
+    | `net.core.rmem_max`, `net.core.wmem_max` | 67108864 (33554432 при RAM < 3000 MB) |
+    | `net.ipv4.tcp_rmem`, `net.ipv4.tcp_wmem` | `4096 1048576 <rmem_max>` |
+    | `net.ipv4.udp_rmem_min`, `net.ipv4.udp_wmem_min` | 16384 |
+    | `net.core.netdev_max_backlog`, `net.core.somaxconn` | 32768 |
+    | `net.ipv4.tcp_max_syn_backlog` | 16384 |
+    | `net.ipv4.tcp_slow_start_after_idle` | 0 |
+    | `net.ipv4.tcp_tw_reuse` | 1 |
+    | `net.ipv4.tcp_fin_timeout` | 15 |
+    | `net.ipv4.ip_local_port_range` | `10240 65535` |
+    | `net.ipv4.tcp_fastopen` | 3 |
+    | `net.ipv4.tcp_keepalive_time`, `_intvl`, `_probes` | 300, 30, 3 |
+    | `net.ipv4.tcp_window_scaling`, `tcp_timestamps`, `tcp_sack` | 1 |
+    | `net.ipv4.tcp_max_orphans` | 32768 |
+    | `net.ipv4.tcp_max_tw_buckets` | 131072 |
+    | `net.ipv4.tcp_mtu_probing` | 1 |
+    | `net.core.default_qdisc` | `fq` |
+    | `net.ipv4.tcp_congestion_control` | `bbr` |
+    | `net.netfilter.nf_conntrack_max` | 262144 |
+    | `net.netfilter.nf_conntrack_tcp_timeout_established` | 1800 |
+    | `net.netfilter.nf_conntrack_udp_timeout`, `_udp_timeout_stream` | 60, 120 |
+    | `net.netfilter.nf_conntrack_generic_timeout` | 120 |
+    | `fs.file-max` | 2097152 |
+    | `fs.inotify.max_user_watches`, `max_user_instances` | 524288, 512 |
+    | `vm.swappiness` | 10 (60 при RAM < 3 GB) |
+    | `vm.vfs_cache_pressure` | 60 |
+    | `vm.dirty_ratio`, `vm.dirty_background_ratio` | 20, 10 |
+    | `vm.dirty_expire_centisecs`, `vm.dirty_writeback_centisecs` | 3000, 500 |
+    | `vm.min_free_kbytes` | 65536 |
+    | `vm.overcommit_memory`, `vm.overcommit_ratio` | 1, 50 |
+    | `vm.zone_reclaim_mode` | 0 |
+    | `net.ipv4.ip_forward`, `net.ipv6.conf.all.forwarding` | 1 |
+    | `net.ipv4.conf.all.rp_filter`, `net.ipv4.conf.default.rp_filter` | 2 (loose) |
+    | `net.ipv4.icmp_echo_ignore_broadcasts`, `icmp_ignore_bogus_error_responses` | 1 |
+    | `accept_source_route` (ipv4/ipv6, all/default) | 0 |
+    | `send_redirects`, `accept_redirects`, `secure_redirects` (ipv4 all/default), `accept_redirects` (ipv6 all/default) | 0 |
+    | `net.ipv4.tcp_syncookies` | 1 |
+    | `kernel.panic`, `kernel.panic_on_oops` | 10, 1 |
+    | `kernel.pid_max`, `kernel.threads-max` | 65536 |
+
+    </details>
+
+13. **Swap.** `/swapfile` размером из шага 8. Активный файл того же размера остается (`chmod 600`); файл другого размера выключается `swapoff` и создается заново (`fallocate`, при неудаче `dd`), `mkswap`, `swapon`. Если `swapoff` не смог вернуть страницы в RAM, прежний swap остается, и итог сообщает «not resized». В `/etc/fstab` остается ровно одна строка `/swapfile none swap sw 0 0`; строка оператора с другими полями (например, `pri=`) не трогается. Если `/swapfile` — не обычный файл, шаг пропускается.
+14. **UFW.** По порядку: `ufw --force enable`, `default deny incoming`, `default allow outgoing`, `DEFAULT_FORWARD_POLICY="ACCEPT"` в `/etc/default/ufw`, `ufw default allow forward` (ufw понимает `forward` как `routed`, проверено на ufw 0.36.2 в Debian 12, и сразу применяет политику пересылки), затем `allow 22/tcp`, `80/tcp`, `443/tcp`. Правило для SSH появляется после включения UFW; текущая сессия сохраняется.
+15. **Fail2Ban.** `/etc/fail2ban/jail.local`: `[DEFAULT]` `bantime = 3600`, `findtime = 600`, `maxretry = 5`, `destemail = root@localhost`, `sendername = Fail2Ban`, `backend = systemd` (через `python3-systemd`, без `/var/log/auth.log`); `[sshd]` `enabled = true`, `port = 22`, `maxretry = 3`, `bantime = 7200`. Копия прежнего файла делается только при изменении содержимого; сервис включается и перезапускается.
+16. **Лимиты.** `/etc/security/limits.d/99-vps-limits.conf`: `nofile` и `nproc` 65535 для `*` и `root`, `memlock unlimited` для `*`. Это единственное место лимитов; `/etc/security/limits.conf` не меняется.
+17. **Автообновления.** `/etc/apt/apt.conf.d/50unattended-upgrades`: только `${distro_id}:${distro_codename}-security`, удаление неиспользуемых ядер и зависимостей, без автоматической перезагрузки. `/etc/apt/apt.conf.d/20auto-upgrades`: ежедневные списки и обновления, `AutocleanInterval 7`.
+18. **Журнал.** `/etc/systemd/journald.conf.d/00-journal-size.conf`: `SystemMaxUse=500M`, `SystemMaxFileSize=100M`, `RuntimeMaxUse=100M`; `systemd-journald` перезапускается.
+19. **Закалка SSH** (стоп при ошибке). Копия `/etc/ssh/sshd_config.backup.<дата>`. Drop-in `/etc/ssh/sshd_config.d/00-optimize-hardening.conf`:
+
+    ```text
+    # SSH Hardening - VPS Optimization
+    PermitRootLogin no
+    PasswordAuthentication no
+    PubkeyAuthentication yes
+    PermitEmptyPasswords no
+    KbdInteractiveAuthentication no
+    ChallengeResponseAuthentication no
+    X11Forwarding no
+    ClientAliveInterval 300
+    ClientAliveCountMax 2
+    MaxAuthTries 3
+    AllowUsers <user>
+    ```
+
+    sshd берет первое прочитанное значение параметра, а `Include /etc/ssh/sshd_config.d/*.conf` в Debian стоит выше остальных строк `sshd_config` и читает drop-in по порядку имен. Поэтому файл назван `00-...` и читается раньше `50-cloud-init.conf` с `PasswordAuthentication yes`. Порядок проверки: `sshd -t`, затем `sshd -T` через `common_sshd_effective_mismatches` для `permitrootlogin no`, `passwordauthentication no`, `pubkeyauthentication yes`, `permitemptypasswords no`, `kbdinteractiveauthentication no`, `allowusers <user>`. Если `sshd -t` не прошел, значения задает файл, прочитанный раньше (`00-aaa.conf`, строка выше `Include` в `sshd_config`), `sshd_config` не подключает каталог drop-in или `sshd -T` не выполнился, скрипт называет расходящиеся параметры, возвращает прежний drop-in (или удаляет новый), не перезапускает sshd и останавливается. `sshd -T` без `-C` не раскрывает блоки `Match`: условия в них проверка не учитывает. При успехе перезапускается `ssh.service` (или `sshd.service`); неудачный перезапуск — стоп с сообщением, что конфигурация записана, но не активна. Drop-in `99-hardening.conf` прежних версий скриптов удаляется после записи нового, если `common_sshd_legacy_dropin_is_ours` узнает его: заголовок `# SSH Hardening - VPS Optimization` или `# Minimal Amnezia host SSH baseline`, либо ровно четыре строки мини-ПК (`PermitRootLogin no`, `PasswordAuthentication no`, `PubkeyAuthentication yes`, `AllowUsers <user>`); файл с тем же именем, но другим содержимым остается. Другие параметры sshd (`AllowTcpForwarding`, `MaxSessions`, `Port`) скрипт не задает: ваши drop-in остаются в силе. `X11Forwarding`, `ClientAlive*`, `MaxAuthTries` можно переопределить в drop-in с именем раньше по сортировке (например, `00-00-local.conf`); пять параметров входа и `AllowUsers` так переопределить нельзя — скрипт остановится на сверке.
+20. **tmpfs.** Если в `/etc/fstab` нет `tmpfs /tmp`, дописываются `/tmp` (1G, `nosuid,nodev`, без `noexec`) и `/var/tmp` (512M, `noexec`). Монтируются после перезагрузки.
+21. **Службы.** `bluetooth`, `cups`, `avahi-daemon` выключаются и останавливаются, если были включены.
+22. **Планировщики I/O.** `/etc/udev/rules.d/60-ioschedulers.conf`: NVMe — `none`, `nr_requests 1024`, `read_ahead_kb 256`, `rq_affinity 2`; SATA SSD — `mq-deadline`, `nr_requests 512`, `read_ahead_kb 128`, `rq_affinity 2`; HDD — `bfq`, `read_ahead_kb 256`. `udevadm control --reload-rules` и `udevadm trigger`.
+23. **CPU governor.** Пакет `linux-cpupower`. Если есть `/sys/devices/system/cpu/cpu0/cpufreq`, выбирается первый доступный из `schedutil`, `powersave`, `ondemand`, иначе `performance`; служба `/etc/systemd/system/cpu-governor.service` (`cpupower frequency-set -g <governor>`) включается и запускается. На большинстве VPS cpufreq нет — шаг пропускается с предупреждением.
+24. **Утилиты.** `/usr/local/bin/vps-monitor.sh` (ядро, CPU и governor, память, диски и планировщики, BBR и qdisc, `ss -s`, swap, VPN-интерфейсы `tun`/`wg`/`ppp`), `vps-cleanup.sh` (`apt-get clean`, `autoclean`, `autoremove`, `journalctl --vacuum-time=7d`, старые ядра кроме текущего и одного предыдущего, файлы старше 7 дней в `/tmp` и `/var/tmp`), `network-test.sh` (ставит `speedtest-cli` при необходимости и запускает его, затем `netstat -s`), `vps-info.sh` (ОС, ядро, CPU, память, swap, диск, публичный IP через `ifconfig.me`/`icanhazip.com`, `ufw status numbered`, Docker). `/etc/cron.weekly/vps-cleanup` запускает очистку еженедельно с выводом в `/var/log/vps-cleanup.log`.
+25. **Итог.** Сводка, напоминание проверить `ssh <user>@<ip>` и `sudo -l` во втором терминале, вывод `vps-info.sh`, вопрос о перезагрузке. Перезагрузка нужна для нового ядра, локали, членства в группе `docker` и tmpfs.
+
+## Файлы, которые пишет скрипт
+
+`<дата>` — `date +%F` (ГГГГ-ММ-ДД). Копии с таким именем делаются один раз в день: `cp` перезаписывает копию того же дня.
+
+| Путь | Что | Как откатить |
+|---|---|---|
+| `/var/log/vps_optimization.log` | лог скрипта | удалить |
+| `/usr/local/bin/gum` | gum 0.17.0 (в `TUI_BACKEND=auto` при выводе в терминал, при `TUI_BACKEND=gum` всегда) | удалить |
+| `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg`, `/etc/network/interfaces.d/50-cloud-init.disabled-by-optimize.<дата>-<ЧЧММСС>` | отключение сетевой конфигурации cloud-init (только при дублировании с ifupdown) | удалить `.cfg`, вернуть файлу имя `50-cloud-init` |
+| `/etc/passwd`, `/etc/group`, `/home/<user>` | пользователь в группах `sudo` и `docker` | `deluser <user>` (с `--remove-home` при необходимости); `gpasswd -d <user> docker` |
+| `/etc/sudoers.d/<user>`, `/etc/sudoers.d/root` | `NOPASSWD:ALL`, записаны через `visudo -cf` | удалить файлы |
+| `~<user>/.ssh/authorized_keys` | строка с ключом | удалить строку |
+| `/etc/locale.gen`, `/etc/default/locale` (Debian 12) или `/etc/locale.conf` (Debian 13), `/etc/profile.d/locale.sh` | `en_US.UTF-8` и `ru_RU.UTF-8`, `LANG`, `LANGUAGE` | `update-locale LANG=<прежняя>`; удалить `locale.sh`; строки в `locale.gen` закомментировать и выполнить `locale-gen` |
+| `/etc/hostname`, `/etc/hosts`, `/etc/localtime`, `/etc/timezone` | hostname и часовой пояс (только если введены) | `hostnamectl set-hostname <прежнее>`, `timedatectl set-timezone <прежний>` |
+| `~/.config/starship.toml`, `~/.config/fish/config.fish` (root и `<user>`) | пресет и конфигурация Fish | удалить; `apt-get purge fish` |
+| `~/.bashrc` (root и `<user>`), `~/.bashrc.backup.<время>.<суффикс>` | `.bashrc` профиля и копия прежнего | вернуть копию на место |
+| `/usr/local/bin/starship` (если нет пакета Debian) | Starship 1.27.0 | удалить |
+| `/usr/local/go`, `/etc/profile.d/golang.sh` | Go 1.27.3 | `rm -rf /usr/local/go`, удалить `golang.sh` и блок `# Go configuration` в `~/.bashrc` |
+| `~/.local/share/fnm`, `~/.local/state/fnm-runtime` (root и `<user>`) | fnm и Node.js LTS | удалить каталоги и блок `# fnm` в `~/.bashrc` |
+| `/etc/apt/sources.list`, `/etc/apt/sources.list.d/*.list`, `*.sources` | компоненты `contrib non-free non-free-firmware` | убрать компоненты из строк `deb`/`Components:` |
+| `/etc/apt/sources.list.d/debian-backports.sources` (Debian 12) | источник `bookworm-backports` | удалить файл; затем `apt-get install linux-image-$(dpkg --print-architecture)/bookworm`, перезагрузка в ядро bookworm и `apt-get purge 'linux-image-*+bpo*' 'linux-headers-*+bpo*'` |
+| `/etc/alternatives/iptables`, `ip6tables`, `iptables-save`, `ip6tables-save` | `legacy` | `update-alternatives --set iptables /usr/sbin/iptables-nft` (и остальные) |
+| `/usr/bin/bat`, `/usr/bin/fd` | ссылки на `batcat` и `fdfind` | удалить ссылки |
+| `/etc/apt/keyrings/docker.gpg`, `/etc/apt/sources.list.d/docker.sources` | репозиторий Docker | удалить оба файла |
+| `/etc/docker/daemon.json`, `/etc/docker/daemon.json.backup.<дата>[.N]` | настройки dockerd, копия прежнего файла при изменении | вернуть копию; `apt-get purge docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin` |
+| `/etc/systemd/system/docker.service.d/override.conf` | `ExecStart` для socket activation | удалить, `systemctl daemon-reload` |
+| `/etc/sysctl.conf` (если отсутствовал), `/etc/sysctl.conf.backup.<дата>` | заглушка и копия | вернуть копию |
+| `/etc/modules-load.d/99-vps-modules.conf` | `tcp_bbr`, `tun`, `wireguard` | удалить |
+| `/etc/sysctl.d/99-vps-optimization.conf` | sysctl из таблицы выше | удалить, `sysctl --system`, перезагрузка для возврата умолчаний ядра |
+| `/swapfile`, строка `/swapfile none swap sw 0 0` в `/etc/fstab` | swap-файл | `swapoff /swapfile`, `rm /swapfile`, удалить строку |
+| `/etc/default/ufw`, `/etc/ufw/*.rules` | `DEFAULT_FORWARD_POLICY="ACCEPT"`, правила `22`, `80`, `443/tcp` | сначала `ufw disable`, затем `ufw delete allow <порт>/tcp` и `ufw default deny routed` (при `deny incoming` новые SSH-сессии закрываются между командами) |
+| `/etc/fail2ban/jail.local`, `jail.local.backup.<дата>[.N]` | джейл `sshd`, копия при изменении | вернуть копию или удалить, `systemctl restart fail2ban` |
+| `/etc/security/limits.d/99-vps-limits.conf` | лимиты 65535 | удалить |
+| `/etc/apt/apt.conf.d/50unattended-upgrades`, `20auto-upgrades` | автообновления безопасности | `apt-get purge unattended-upgrades` или удалить файлы |
+| `/etc/systemd/journald.conf.d/00-journal-size.conf` | лимиты журнала | удалить, `systemctl restart systemd-journald` |
+| `/etc/ssh/sshd_config.backup.<дата>` | копия `sshd_config` (сам файл не меняется) | — |
+| `/etc/ssh/sshd_config.d/00-optimize-hardening.conf` | закалка SSH; `99-hardening.conf` прежних версий удаляется | удалить, `sshd -t`, `systemctl restart ssh` |
+| `/etc/fstab` | строки tmpfs для `/tmp` и `/var/tmp` | удалить строки, перезагрузка |
+| `/etc/udev/rules.d/60-ioschedulers.conf` | планировщики I/O | удалить, `udevadm control --reload-rules`, перезагрузка |
+| `/etc/systemd/system/cpu-governor.service` | governor при загрузке | `systemctl disable --now cpu-governor.service`, удалить |
+| `/usr/local/bin/vps-monitor.sh`, `vps-cleanup.sh`, `network-test.sh`, `vps-info.sh`, `/etc/cron.weekly/vps-cleanup`, `/var/log/vps-cleanup.log` | утилиты и еженедельная очистка | удалить |
+
+Удаляются: `/etc/apt/sources.list.d/xanmod-release.list` и `/usr/share/keyrings/xanmod-archive-keyring.gpg` (XanMod прежних версий), пакеты `docker.io docker-doc docker-compose podman-docker containerd runc`.
+
+## Проверка после запуска
+
+Выполняйте от нового пользователя после перезагрузки (`uname -r`, группа `docker` и tmpfs применяются после нее).
+
 ```bash
-# Go сразу доступен
-go version
-go mod init example.com/hello
-go run main.go
+# SSH: действующие значения sshd
+sudo sshd -T | grep -E '^(permitrootlogin|passwordauthentication|pubkeyauthentication|kbdinteractiveauthentication|allowusers) '
+# permitrootlogin no / passwordauthentication no / pubkeyauthentication yes /
+# kbdinteractiveauthentication no / allowusers <user>
 
-# Переменные окружения
-echo $GOPATH     # $HOME/go
-echo $GOROOT     # /usr/local/go
-```
-
-### Конфигурация
-- `/etc/profile.d/golang.sh` - глобальная конфигурация для всех shells
-- `~/.config/fish/config.fish` и `~/.bashrc` - локальная конфигурация для Fish и Bash (автоматически добавляется)
-
-## ⬢ Node.js с fnm
-
-### fnm установка
-- **Fast Node Manager (fnm)** - быстрый нативный менеджер версий Node.js
-- fnm 1.39.0 из релиза GitHub: архив сверяется с SHA-256, записанной в скрипте; shell rc файлы установщик не меняет
-- Автоматическая установка последней LTS версии
-- `corepack enable` для pnpm/yarn, где доступно
-- Установка для root и целевого пользователя
-- Текущая реализация рассчитана на **чистую ОС** и не выполняет миграцию старых NVM-конфигураций
-
-### Node.js версии
-- Автоматическая установка последней LTS версии
-- Простое переключение между версиями: `fnm use 18`, `fnm use 20`
-- npm install работает БЕЗ sudo
-
-### Использование
-```bash
-# Проверка версии
-fnm --version
-node --version
-npm --version
-
-# Управление версиями
-fnm list
-fnm install 18
-fnm use 18
-fnm default 18
-
-# npm без sudo
-npm install -g some-package
-npm install
-```
-
-### fnm конфигурация
-```fish
-# ~/.config/fish/config.fish автоматически содержит:
-if test -d "$HOME/.local/share/fnm"
-    set -gx FNM_PATH "$HOME/.local/share/fnm"
-    fish_add_path -g "$FNM_PATH"
-end
-if command -v fnm >/dev/null 2>&1
-    fnm env --use-on-cd --shell fish | source
-end
-```
-
-## 🚀 Debian Backports Kernel
-
-### Особенности
-- **Стабильность** - официальные пакеты ядра Debian LTS (`linux-image-${ARCH}`, `linux-headers-${ARCH}`)
-- **Архитектуры** - полная поддержка x86_64 (`amd64`) и ARM64 (`arm64`)
-- **Безопасность** - своевременные обновления безопасности напрямую от команды безопасности Debian
-- **Совместимость** - полная поддержка WireGuard in-tree, BBR, TUN/TAP и Docker
-
-### Проверка
-```bash
-# Проверка установленного ядра
+# Ядро (Debian 12: `uname -r` содержит `+bpo`)
 uname -r
-dpkg -l | grep linux-image
+apt policy linux-image-$(dpkg --print-architecture) | head -n 3
+
+# sysctl
+sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc net.ipv4.ip_forward net.ipv4.conf.all.rp_filter net.core.rmem_max
+# bbr / fq / 1 / 2 / 67108864 (33554432 при RAM < 3000 MB)
+lsmod | grep -E '^(tcp_bbr|tun|wireguard) '
+
+# Swap
+swapon --show
+# NAME      TYPE SIZE ...   -> /swapfile file <размер из шага 8>
+grep swapfile /etc/fstab
+# /swapfile none swap sw 0 0
+
+# Firewall и Fail2Ban
+sudo ufw status verbose
+# Status: active; Default: deny (incoming), allow (outgoing), allow (routed); 22,80,443/tcp ALLOW IN
+sudo fail2ban-client status sshd
+
+# Службы
+systemctl is-active docker docker.socket fail2ban systemd-journald
+timedatectl | grep -E 'NTP service|synchronized'
+# NTP service: active
+
+# Лимиты, локаль, журнал
+ulimit -n            # 65535
+locale -a | grep -E '^(en_US|ru_RU)\.utf8$'
+journalctl --disk-usage
+
+# Инструменты (от пользователя, в новой сессии)
+sudo -l             # (ALL) NOPASSWD: ALL
+docker ps           # без sudo
+go version          # go1.27.3
+fnm --version && node --version
+echo $SHELL; fish --version   # SHELL остается /bin/bash, интерактивная сессия в Fish
 ```
 
-## 🐳 Docker оптимизация
-
-### daemon.json конфигурация
-```json
-{
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  },
-  "storage-driver": "overlay2",
-  "features": {
-    "buildkit": true
-  }
-}
-```
-
-**Примечание:** Конфигурация оптимизирована для Debian 13 с поддержкой systemd socket activation. Не используются `default-address-pools` и `default-ulimits` для избежания конфликтов с systemd.
-
-### Сеть и производительность
-- **overlay2 storage driver** - максимальная производительность и совместимость
-- **json-file логирование** - ограничение размера логов предотвращает переполнение диска
-- **BuildKit** - ускорение сборки образов
-- **systemd socket activation** - правильная интеграция с systemd для автозапуска
-- **iptables-legacy** - обеспечение совместимости с Debian 13/13+ (использует nftables по умолчанию, требуется переключение перед UFW)
-
-## 🔒 Безопасность
-
-### SSH Hardening
-```bash
-# /etc/ssh/sshd_config
-Port 22
-PermitRootLogin no
-PasswordAuthentication no
-PubkeyAuthentication yes
-MaxAuthTries 3
-ClientAliveInterval 300
-```
-
-### Fail2Ban
-- **SSH защита** - блокировка брутфорса
-- **настроенные jail'ы** - оптимальные параметры
-- **логирование** - детальная статистика
-
-### UFW Firewall
-```bash
-# Стандартные правила
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp        # SSH
-ufw allow 80/tcp        # HTTP
-ufw allow 443/tcp       # HTTPS
-ufw enable --force
-```
-
-**Важно для Debian 13+:** Скрипт автоматически переключает iptables на legacy режим перед установкой UFW, чтобы избежать конфликтов с nftables. Это критично для правильной работы файрвола.
-
-> [!WARNING]
-> **Docker и UFW (обход правил фильтрации):** Демон Docker по умолчанию настраивает цепочки iptables (PREROUTING) напрямую, минуя правила фильтрации UFW. Порты контейнеров, опубликованные наружу через `-p <port>:<port>`, будут открыты всему миру независимо от `ufw default deny incoming`. Для ограничения доступа привязывайте порты к localhost (`-p 127.0.0.1:<port>:<port>`) или используйте проект `ufw-docker`.
-
-## ⚡ Оптимизация производительности
-
-### VPN-специфичные настройки (70+ параметров)
-```bash
-# Reverse Path Filtering (Loose mode 2 для асимметричной маршрутизации VPN/WireGuard/Docker)
-net.ipv4.conf.all.rp_filter = 2
-net.ipv4.conf.default.rp_filter = 2
-
-# TCP Fast Open (reduces VPN connection latency by 15-40%)
-net.ipv4.tcp_fastopen = 3
-
-# UDP Buffer Sizes (critical for VPN protocols like WireGuard, OpenVPN)
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-
-# IP Forwarding (required for VPN)
-net.ipv4.ip_forward = 1
-net.ipv6.conf.all.forwarding = 1
-
-# Connection Tracking (for multiple simultaneous VPN connections)
-net.netfilter.nf_conntrack_max = 262144
-net.netfilter.nf_conntrack_tcp_timeout_established = 1800
-
-# NAT Performance
-net.ipv4.ip_local_port_range = 10240 65535
-net.ipv4.tcp_tw_reuse = 1
-
-# BBR congestion control
-net.ipv4.tcp_congestion_control = bbr
-net.core.default_qdisc = fq
-```
-
-### Сетевые настройки (оптимизировано под каналы до 10 Гбит/с)
-```bash
-# TCP/UDP Buffer Sizes (адаптивно до 64MB для 10G BDP)
-net.core.rmem_default = 2097152  # 2MB (1MB на VPS с <3GB RAM)
-net.core.wmem_default = 2097152
-net.core.rmem_max = 67108864   # 64MB (или 32MB на VPS с <3GB RAM)
-net.core.wmem_max = 67108864
-net.ipv4.tcp_rmem = 4096 1048576 67108864  # максимум = rmem_max
-net.ipv4.tcp_wmem = 4096 1048576 67108864
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
-
-# Сетевые очереди для высокого throughput
-net.core.netdev_max_backlog = 32768
-net.core.somaxconn = 32768
-net.ipv4.tcp_max_syn_backlog = 16384
-```
-
-### Файловая система
-```bash
-# Увеличенные лимиты файлов
-fs.file-max = 2097152
-fs.inotify.max_user_watches = 524288
-
-# Оптимизация памяти
-vm.swappiness = 10            # 60 на VPS с <3GB RAM
-vm.vfs_cache_pressure = 60
-vm.dirty_ratio = 20
-vm.dirty_background_ratio = 10
-```
-
-### I/O планировщики (расширенная оптимизация)
-```bash
-# NVMe drives - extended optimization
-ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/scheduler}="none"
-ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/nr_requests}="1024"
-ACTION=="add|change", KERNEL=="nvme[0-9]n[0-9]", ATTR{queue/read_ahead_kb}="512"
-
-# SSD drives - extended optimization
-ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/scheduler}="mq-deadline"
-ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/nr_requests}="512"
-ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="256"
-
-# HDD drives
-ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="1", ATTR{queue/scheduler}="bfq"
-```
-
-### CPU Governor
-```bash
-# Schedutil governor - balance between performance and power efficiency
-# Автоматически применяется ко всем CPU ядрам
-for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-    echo "schedutil" > "$cpu"
-done
-```
-
-### System Limits
-```bash
-# /etc/security/limits.d/99-vps-limits.conf (единственное место лимитов; повторный запуск его перезаписывает)
-* soft nofile 65535
-* hard nofile 65535
-* soft nproc 65535
-* hard nproc 65535
-* soft memlock unlimited
-* hard memlock unlimited
-root soft nofile 65535
-root hard nofile 65535
-root soft nproc 65535
-root hard nproc 65535
-```
-
-## 🛠️ Утилиты скрипта
-
-### vps-monitor.sh
-Мониторинг системы:
-```bash
-vps-monitor.sh
-```
-- Системная информация
-- Использование CPU/памяти/диска
-- Сетевая статистика
-- Top процессы
-
-### vps-cleanup.sh
-Очистка системы:
-```bash
-vps-cleanup.sh
-```
-- Очистка кэша пакетов
-- Удаление старых логов
-- Очистка Docker
-- Удаление временных файлов
-
-### vps-info.sh
-Информация о системе:
-```bash
-vps-info.sh
-```
-- Детальная информация о железе
-- Версия ОС и ядра
-- Сетевые настройки
-- Установленные пакеты
-
-### network-test.sh
-Тестирование сети:
-```bash
-network-test.sh
-```
-- Скорость соединения
-- Пинг до популярных сервисов
-- DNS тестирование
-- Тестирование BBR
-
-## 🔧 Конфигурационные файлы
-
-### Файлы, которые пишет скрипт
-- `/etc/sysctl.d/99-vps-optimization.conf` — значения из разделов «Сетевые настройки» и «Файловая система» выше
-- `/etc/security/limits.d/99-vps-limits.conf` — `nofile` и `nproc` 65535
-- `/etc/modules-load.d/99-vps-modules.conf` — модули, загружаемые при старте
-- `/etc/ssh/sshd_config.d/00-optimize-hardening.conf` — SSH-закалка
-
-### /etc/ssh/sshd_config.d/00-optimize-hardening.conf
-```bash
-PermitRootLogin no
-PasswordAuthentication no
-PubkeyAuthentication yes
-PermitEmptyPasswords no
-KbdInteractiveAuthentication no
-ChallengeResponseAuthentication no
-X11Forwarding no
-ClientAliveInterval 300
-ClientAliveCountMax 2
-MaxAuthTries 3
-AllowUsers <пользователь>
-```
-
-sshd берет первое прочитанное значение параметра, а drop-in из `/etc/ssh/sshd_config.d/` читает по порядку имен, поэтому файл назван `00-…` и читается раньше остальных (например, `50-cloud-init.conf` с `PasswordAuthentication yes`). После `sshd -t` скрипт сверяет действующие значения через `sshd -T`: если их задает файл, прочитанный раньше, или `sshd_config` не подключает каталог drop-in, закалка откатывается, SSH не перезапускается, а скрипт называет расходящиеся параметры и останавливается. Файл `99-hardening.conf` прежних версий скрипта удаляется; файл с тем же именем, но другим содержимым остается.
-
-Других параметров sshd (например, `AllowTcpForwarding`, `MaxSessions`) скрипт не задает, и ваши значения в drop-in остаются в силе. `X11Forwarding`, `ClientAlive*` и `MaxAuthTries` можно переопределить в drop-in, имя которого сортируется раньше (например, `00-00-local.conf`); параметры входа (`PermitRootLogin`, `PasswordAuthentication`, `PubkeyAuthentication`, `PermitEmptyPasswords`, `KbdInteractiveAuthentication`) так переопределить нельзя — скрипт остановится на сверке.
-
-## 🔄 Обновление и поддержка
-
-### Автоматические обновления
-- Безопасные обновления включены
-- Еженедельная очистка системы
-- Автоматическое удаление старых ядер
-- Мониторинг безопасности
-
-### Ручное обновление
-```bash
-# Обновить скрипт
-curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh
-
-# Проверить систему
-vps-monitor.sh
-
-# Очистить систему
-vps-cleanup.sh
-```
-
-## 🐛 Устранение проблем
-
-### Работа с VSCode Terminal (Remote SSH / Tunnels)
-
-- **Интеграция с Fish:** Скрипт сохраняет `/bin/bash` системным shell в `/etc/passwd`. При открытии интерактивного терминала в VSCode через `~/.bashrc` автоматически стартует Fish со всеми алиасами и Starship.
-- **Совместимость с VSCode Server:** Внутренние неинтерактивные команды VSCode выполняются через чистый Bash без сбоев окружения (в отличие от старых конфигураций с `KSH_ARRAYS`).
-- **Если терминал не переключился на Fish:** убедитесь, что в `~/.bashrc` присутствует блок запуска `exec fish`, и перезапустите терминальную сессию в VSCode (`Ctrl + ~`).
-
-### Проблемы с npm EACCES
-
-**Ошибка:**
-```
-npm error code EACCES
-npm error Your cache folder contains root-owned files
-```
-
-**Решение (автоматически применено в скрипте):**
-fnm устанавливается в user-local директории, сохраняя корректные права.
-
-**Ручное исправление (если нужно):**
-```bash
-sudo chown -R $(whoami):$(whoami) ~/.npm
-sudo chown -R $(whoami):$(whoami) ~/.local/share/fnm
-sudo chown -R $(whoami):$(whoami) ~/.config
-npm cache clean --force
-```
-
-### Проблемы с ядром
-```bash
-# Проверить версию ядра
-uname -r
-
-# Список установленных ядер
-dpkg --list | grep linux-image
-
-# Удалить старые ядра
-sudo apt autoremove --purge
-```
-
-### Проблемы с SSH
-```bash
-# Проверить статус
-sudo systemctl status ssh
-
-# Проверить конфигурацию
-sudo sshd -t
-
-# Перезапустить сервис
-sudo systemctl restart ssh
-```
-
-### Проблемы с Docker
-```bash
-# Проверить статус
-sudo systemctl status docker
-
-# Проверить группу
-groups $USER
-
-# Добавить в группу
-sudo usermod -aG docker $USER
-newgrp docker
-```
-
-## 📊 Мониторинг
-
-### Системные метрики
-- **CPU** - использование, load average
-- **Память** - RAM, swap, кэши
-- **Диск** - использование, I/O статистика
-- **Сеть** - трафик, соединения, BBR
-
-### Логирование
-- **Системные логи** - journalctl
-- **SSH логи** - auth.log
-- **Docker логи** - container logs
-- **Производительность** - sar, iostat
-
-## 📈 Сравнение с стандартной установкой
-
-| Характеристика | Стандартная установка | После оптимизации |
-|---------------|---------------------|-------------------|
-| Ядро | Стандартное | Debian Backports (LTS) |
-| Shell | Bash | Fish + Starship |
-| Сеть | Базовая (1G) | 10G tuning (BBR, fq, 64MB buffers) |
-| Безопасность | Базовая | Усиленная (Fail2Ban + UFW forward ACCEPT) |
-| Производительность | Стандартная | Оптимизированная (70+ sysctl) |
-| Контейнеризация | Нет | Docker CE |
-| Мониторинг | Базовый | Расширенный |
-
-## 📝 Лог изменений
-
-### v3.0.0 (Текущая) - 2026-09-04
-- 🚀 **Debian Backports kernel** - замена XanMod на официальный `bookworm-backports` (amd64 и arm64)
-- 🐟 **Fish + Starship** - переход на Fish shell со Starship пресетом `nerd-font-symbols`
-- ⚡ **10 Gbps Networking** - адаптивные сетевые буферы до 64MB, очереди 32k, conntrack 262k
-- 🛡️ **Fail2Ban** - переход на прямой `backend = systemd` через `python3-systemd` (без зависимости от `/var/log/auth.log`)
-- 🔒 **UFW & SSH** - добавление `DEFAULT_FORWARD_POLICY="ACCEPT"` для VPN-пакетов, предупреждение об обходе фильтрации Docker, переход на `KbdInteractiveAuthentication no`
-- 📦 **Persistent modules** - автозагрузка `tcp_bbr`, `tun`, `wireguard` через `/etc/modules-load.d/`
-- 🔒 **Security & Stability Hardening** - безопасная атомарная запись sudoers с `visudo -cf`, безопасное определение домашних каталогов (`getent passwd`), исправление монтирования `/tmp` (без `noexec`), и свободный Loose `rp_filter = 2` для VPN/Docker.
-
-### v2.3.0 (Архив) - 2026-02-04
-- ✅ **Debian 12/13 support**
-- ✅ **Валидация username** с retry при ошибке (числовой, пустой, неверные символы, слишком длинный)
-- 🔧 **Удалены дубликаты функций** (check_dialog)
-- ✅ **deb822-aware APT enrichment**
-- ✅ **CPU tooling:** `linux-cpupower`
-
-### v2.2.0 (Архив) - 2025-12-12
-- ⚡ **Zsh Ultra-Fast** - терминал загружается на 70-90% быстрее
-- ✨ **Legacy Node manager автообновление** - автоматическое определение последней версии через GitHub API
-- ✨ **Fallback версия** - v0.40.1 если API недоступен
-- 🔧 **VSCode Terminal fix** - исправление ошибки `__vsc_update_env` для Remote SSH/Tunnels
-- 🔧 **KSH_ARRAYS** - условное включение только вне VSCode терминала
-- ✨ **npm без sudo** - установка legacy Node manager от имени пользователя для корректных прав
-- ✨ **Для всех пользователей** - root, NEW_USER и DOCKER_USER получают одинаковые настройки
-- 📚 Обновленная документация с описанием всех исправлений
-
-### v2.0.0 (Архив)
-- ✨ **Go** установка (последняя версия, SHA256 верификация)
-- ✨ **Node.js + legacy Node manager** с LTS версией (фиксированная v0.39.7)
-- ✨ Автоматическая инициализация Go и legacy Node manager в .zshrc
-- ✨ Упрощенная docker daemon.json конфигурация
-- ✨ iptables-legacy конфигурация для Debian 13
-- ✨ Systemd socket activation для Docker
-
-### v1.0.0 (Архив)
-- 🐧 Базовый VPS скрипт оптимизации
-- 🐧 XanMod kernel поддержка
-- 🐧 Zsh + Starship конфигурация
-- 🐧 Docker CE + Docker Compose
-- 🐧 SSH hardening и безопасность
-- 🐧 Системная оптимизация
-- 🐧 Утилиты мониторинга
-
-## 🤝 Сообщество
-
-- **GitHub Issues** - сообщения об ошибках
-- **GitHub Discussions** - вопросы и предложения
-- **Pull Requests** - вклад в разработку
-
-## 📄 Лицензия
-
-MIT License - свободное использование и модификация.
-
-## 🔗 См. также
-
-- **[Debian Upgrade Guide](README_UPGRADE.md)** - обновление Debian 11/12 до 13 перед VPS-оптимизацией
-- **[Главный README](../README.md)** - обзор всех скриптов репозитория
-
----
-
-**Создано с ❤️ для VPS сообщества**
+## Повторный запуск и откат
+
+Повторный запуск того же скрипта безопасен по коду в следующем:
+
+- Существующий пользователь не пересоздается; ключ не дублируется в `authorized_keys`; sudoers перезаписываются тем же содержимым через `visudo -cf`.
+- Локали генерируются с `--keep-existing`; hostname и часовой пояс остаются, если нажать Enter.
+- `.bashrc` профиля заменяется без новой копии (копия делается только для чужого файла); `config.fish` и `starship.toml` перезаписываются.
+- Go заменяется той же закрепленной версией; блоки Go и fnm в `.bashrc` не дублируются (`grep GOROOT`, `grep FNM_PATH`).
+- fnm и Node.js LTS ставятся заново под пользователем.
+- Источники APT переписываются только при добавлении компонента; источники backports и Docker — тем же содержимым.
+- `daemon.json` и `jail.local` получают копию `*.backup.<дата>` только при изменении содержимого; одинаковый файл не трогается. dockerd при этом завершается `pkill -9 dockerd` и запускается заново — учитывайте на сервере с работающими контейнерами.
+- Swap нужного размера остается с тем же inode; в `fstab` остается одна строка. Изменился объем RAM — файл пересоздается.
+- Правила UFW не дублируются; лимиты, sysctl, модули, journald, udev, governor и утилиты перезаписываются тем же содержимым.
+- Drop-in SSH прежнего запуска сохраняется во временной копии и возвращается, если новый не прошел `sshd -t` или сверку `sshd -T`.
+
+Остатки прежних версий, которые повторный запуск не убирает: блок в `/etc/security/limits.conf` (на действующие значения не влияет, `limits.d` читается позже).
+
+Откат: восстановите снимок VPS, сделанный до запуска. Без снимка используйте колонку «Как откатить» в таблице выше; порядок: сначала SSH (проверка входа во втором терминале), затем UFW, затем остальное. Чтобы снова разрешить вход по паролю или root временно, создайте drop-in с именем раньше `00-optimize-hardening.conf` (например, `00-00-local.conf`), проверьте `sshd -t` и перезапустите `ssh`; при следующем запуске скрипта такой файл остановит его на сверке.
+
+## Решение проблем
+
+| Симптом | Причина | Действие |
+|---|---|---|
+| Скрипт остановился на «sshd does not take the hardening values» и перечислил параметры | Значение задает drop-in с именем раньше `00-optimize-hardening.conf`, строка выше `Include` в `/etc/ssh/sshd_config` или `sshd_config` без `Include sshd_config.d/*.conf` | Найдите источник: `grep -rn -i '<параметр>' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/`; уберите переопределение или верните `Include /etc/ssh/sshd_config.d/*.conf` первой строкой; sshd не перезапускался, старая сессия жива — запустите скрипт снова |
+| После закалки не входит по SSH | Ключ не в `~<user>/.ssh/authorized_keys`, вход под другим именем (`AllowUsers`), либо клиент предлагает пароль | Из второй сессии (или консоли провайдера): `sudo sshd -T \| grep allowusers`, `cat ~<user>/.ssh/authorized_keys`; `ssh -i <ключ> -o IdentitiesOnly=yes <user>@<ip>`; в крайнем случае удалите drop-in и `systemctl restart ssh` |
+| `Debian Backports kernel ... was not installed` | Нет доступа к `deb.debian.org`, индекс не обновился или пакет установлен не из `bookworm-backports` | `apt policy linux-image-$(dpkg --print-architecture)`, `apt-get update`, повторите запуск |
+| `cannot change locale (ru_RU.UTF-8)` при входе по SSH | Клиент передает `LC_*`, а на сервере, настроенном прежней версией, нет локали | Выполните в Bash: `sudo apt-get install -y locales`, включите `en_US.UTF-8 UTF-8` и `ru_RU.UTF-8 UTF-8` в `/etc/locale.gen`, `sudo locale-gen --keep-existing`, проверьте `locale -a`; то же описано в [руководстве Amnezia](README_AMNEZIA_HOST.md) |
+| Терминал VSCode (Remote SSH, Tunnels) не перешел в Fish | В `~/.bashrc` нет блока `exec fish`, либо сессия неинтерактивна | Убедитесь, что `~/.bashrc` начинается с `# VPS Optimized Bash Configuration` и содержит `exec fish`; откройте новый терминал. Внутренние команды VSCode идут через Bash и работать не перестают: `/etc/passwd` оставлен `/bin/bash` |
+| В Fish нет `fnm` или `node` | `config.fish` подключает `fnm env`, только если `fnm` уже в PATH | В Fish: `fish_add_path ~/.local/share/fnm`; затем `fnm env --use-on-cd --shell fish \| source` |
+| `npm error code EACCES` (`Your cache folder contains root-owned files`) | Каталоги npm или fnm принадлежат root | `sudo chown -R $(whoami):$(whoami) ~/.npm ~/.local/share/fnm ~/.config && npm cache clean --force`; скрипт ставит fnm от имени пользователя, ошибка возможна после ручной установки от root |
+| `docker ps` требует sudo | Членство в группе `docker` действует с новой сессии | Перелогиньтесь или `newgrp docker`; проверка `groups $USER`, `sudo usermod -aG docker $USER` |
+| Порт контейнера открыт наружу, хотя UFW запрещает входящие | Docker пишет правила iptables (`PREROUTING`) в обход цепочек UFW | Публикуйте порты на `127.0.0.1` (`-p 127.0.0.1:<port>:<port>`) или используйте `ufw-docker` |
+| `Swap file not resized ...; the previous swap stays` | `swapoff` не смог вернуть страницы в RAM | Освободите память или перезагрузитесь и запустите скрипт снова; прежний swap работает |
+| `CPU frequency scaling not available` | У виртуального CPU нет cpufreq | Нормально для VPS; governor не настраивается |
+| `apt-get update failed ... dpkg lock is still held` | Другой менеджер пакетов (unattended-upgrades) держит блокировку дольше 300 с | Дождитесь `systemctl is-active apt-daily-upgrade.service` = inactive и повторите |
+| После перезагрузки сеть не поднялась на cloud-образе | Скрипт отключил сетевую конфигурацию cloud-init из-за дубля с ifupdown | Проверьте интерфейсы в `/etc/network/interfaces`; для возврата удалите `/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg` и верните имя `50-cloud-init` |
+| Старые ядра занимают место | Ядра удаляются `unattended-upgrades` и еженедельным `vps-cleanup.sh` | `dpkg --list \| grep linux-image`, `sudo apt autoremove --purge` |
+| Нужно проверить Docker | — | `sudo systemctl status docker`, `docker info`, `journalctl -u docker -n 50` |
+
+## См. также
+
+- [README](../README.md) — все скрипты, [Версии и выпуски](../README.md#версии-и-выпуски)
+- [Оглавление документации](README.md)
+- [Устройство репозитория](ARCHITECTURE.md) — встроенные копии `lib/`, `optimize_main`, тесты, CI
+- [Обновление Debian 11/12 до 13](README_UPGRADE.md) — перед оптимизацией VPS
+- [Руководство Amnezia host](README_AMNEZIA_HOST.md) — та же закалка SSH и sysctl для хоста AmneziaVPN
+- [SECURITY.md](../SECURITY.md) — как сообщить об уязвимости
+- [CONTRIBUTING.md](../CONTRIBUTING.md) — проверки перед PR
+- [CHANGELOG.md](../CHANGELOG.md) — изменения по выпускам
+- [LICENSE](../LICENSE) — MIT
+
+<details>
+<summary>История версий optimize_vps.sh до выпуска v2026.10.21</summary>
+
+- 3.0.0 (2026-09-04): ядро Debian Backports вместо XanMod (amd64 и arm64); Fish + Starship с пресетом `nerd-font-symbols`; сетевые буферы до 64 MB, очереди 32768, conntrack 262144; Fail2Ban с `backend = systemd`; UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"` и предупреждение об обходе UFW контейнерами; `KbdInteractiveAuthentication no`; модули `tcp_bbr`, `tun`, `wireguard` через `modules-load.d`; sudoers через `visudo -cf`; домашние каталоги через `getent passwd`; `/tmp` без `noexec`; loose `rp_filter = 2`.
+- 2.3.0 (2026-02-04): Debian 12/13; проверка имени пользователя с повтором; deb822-aware обогащение источников APT; `linux-cpupower`.
+- 2.2.0 (2025-12-12): Zsh; менеджер Node.js прежнего поколения с автообновлением и `npm` без sudo; исправление терминала VSCode; одинаковые настройки для root и пользователя.
+- 2.0.0: Go с проверкой SHA-256; Node.js LTS; упрощенный `daemon.json`; iptables-legacy; socket activation для Docker.
+- 1.0.0: базовый скрипт, ядро XanMod, Zsh + Starship, Docker CE, закалка SSH, утилиты мониторинга.
+
+</details>

@@ -1,149 +1,47 @@
-# Linux Optimization Scripts Collection
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+    <img src="docs/assets/banner-light.svg" alt="optimize-debian: настройка Debian 12/13 одной командой для VPS, AmneziaVPN, мини-ПК и WSL2 и обновление Debian 11/12 до 13; проверки sshd -T, visudo -cf, SHA-256 загрузок и sysctl BBR + fq" width="100%">
+  </picture>
+</p>
 
-Коллекция скриптов оптимизации и обновления Debian для различных окружений Linux.
+<p align="center">
+  <a href="https://github.com/snaplyze/optimize-debian/actions/workflows/ci.yml"><img src="https://github.com/snaplyze/optimize-debian/actions/workflows/ci.yml/badge.svg?branch=main" alt="Checks"></a>
+  <a href="https://github.com/snaplyze/optimize-debian/releases/latest"><img src="https://img.shields.io/github/v/release/snaplyze/optimize-debian?sort=date&display_name=tag&label=%D0%B2%D1%8B%D0%BF%D1%83%D1%81%D0%BA" alt="Последний выпуск"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/snaplyze/optimize-debian" alt="Лицензия"></a>
+  <a href="docs/README.md"><img src="https://img.shields.io/badge/Debian-12%20%7C%2013-A81D33" alt="Debian 12 | 13"></a>
+</p>
 
-Все `optimize_*.sh` при настройке локалей генерируют `en_US.UTF-8` и `ru_RU.UTF-8`, чтобы SSH-сессии с английским или русским окружением работали без предупреждений `setlocale`. Amnezia-профиль делает это автоматически, сохраняя системный язык; в Mini PC и WSL2 шаг можно отключить. Выбор языка в VPS, Mini PC и WSL2 задаёт значение по умолчанию через `update-locale`, без постоянного `LC_ALL`. Для уже настроенного сервера см. [исправление ошибки локали](docs/README_AMNEZIA_HOST.md#ошибка-setlocale-при-входе-по-ssh).
+Bash-скрипты, которые настраивают чистую Debian 12/13 под VPS, хост AmneziaVPN, мини-ПК Intel N5095 и WSL2 и обновляют Debian 11/12 до 13. Каждый скрипт — один файл: его запускают от root на целевой машине одной командой, а что именно он меняет, описано в руководстве.
 
-## 📁 Скрипты
+[Какой скрипт выбрать](#какой-скрипт-выбрать) · [Быстрый старт](#быстрый-старт) · [Как работает скрипт](#как-работает-скрипт) · [Возможности](#возможности) · [Безопасность](#безопасность) · [Версии и выпуски](#версии-и-выпуски) · [Документация](#документация) · [Решение частых проблем](#решение-частых-проблем) · [Участие в разработке](#участие-в-разработке) · [Лицензия](#лицензия)
 
-### 🖥️ VPS Optimization (`optimize_vps.sh`) - v3.0.0
-**Назначение:** Оптимизация VPN-серверов на базе Debian (1-4GB RAM, до 10 Гбит/с)
-- **Поддерживаемые ОС:** **Debian 12 (Bookworm)** и **Debian 13 (Trixie)**
-- **Особенности:** Debian Backports kernel, Fish + Starship, 10G sysctl, Node.js/fnm, Docker, SSH hardening
-- **Использование:** `sudo ./optimize_vps.sh`
+## Какой скрипт выбрать
 
-**Ключевые возможности:**
-- 🚀 **Debian Backports kernel** - официальное LTS ядро из `bookworm-backports` (amd64/arm64)
-- 🐟 **Fish + Starship** - интерактивный Fish shell со Starship пресетом `nerd-font-symbols`, гибридный запуск (сохраняет `/bin/bash` как login shell)
-- ⚡ **10 Gbps Networking** - BBR, fq pacing, адаптивные буферы до 64MB, очереди 32k, conntrack 262k
-- 🌐 **VPN-оптимизация** - IP forwarding, persistent modules (`tcp_bbr`, `tun`, `wireguard`), UDP буферы
-- 🐳 Docker CE + Docker Compose
-- 🔒 SSH hardening и безопасность (Fail2Ban с `python3-systemd`, UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"`, safe sudoers с `visudo -cf`, Loose `rp_filter = 2`)
-- 📈 **70+ sysctl параметров** для VPN (WireGuard, OpenVPN, IPsec)
-- 🖥️ CPU Governor (`schedutil` для баланса)
-- ⏱️ **Time sync hardening:** обнаружение существующего NTP daemon + fallback на `systemd-timesyncd`
-- 📊 Расширенный мониторинг утилит
+| Скрипт | Для чего | Debian | Версия скрипта | Руководство |
+|---|---|---|---|---|
+| `optimize_vps.sh` | VPN-сервер на VPS с 1–4 GB RAM: ядро Debian Backports, sysctl под 10 Гбит/с, Fish + Starship, Go, Node.js/fnm, Docker, закалка SSH, Fail2Ban, UFW | 12, 13 | 3.0.0 | [docs/README_VPS.md](docs/README_VPS.md) |
+| `optimize_amnezia_host.sh` | Хост под AmneziaVPN self-hosted: только база для приложения Amnezia, параметры флагами, firewall в две фазы | 12, 13 | 0.3.0 | [docs/README_AMNEZIA_HOST.md](docs/README_AMNEZIA_HOST.md) |
+| `optimize_mini_pc.sh` | Домашний и медиасервер на Intel N5095: ядро Debian Backports, Intel QuickSync, Samba, Docker, Fish + Starship | 12, 13 | 2.0.0 | [docs/README_MINI_PC.md](docs/README_MINI_PC.md) |
+| `optimize_wsl2.sh` | WSL2 для разработки и ML: systemd в `wsl.conf`, Fish + Starship, Go, Node.js/fnm, Docker, NVIDIA Container Toolkit и CUDA | 12, 13 | 4.1.0 | [docs/README_WSL2.md](docs/README_WSL2.md) |
+| `upgrade-to-debian13.sh` | Обновление серверной Debian до 13 с бэкапом и проверкой SSH после каждого шага; не для WSL2 | 11, 12 | 2.0.3 | [docs/README_UPGRADE.md](docs/README_UPGRADE.md) |
 
----
+Версия скрипта — значение `SCRIPT_VERSION` в его коде; `bash <скрипт> --help` печатает ее без root. Четыре `optimize_*.sh` при запуске проверяют версию Debian и на любой другой завершаются сразу.
 
-### 🔐 Amnezia Host Baseline (`optimize_amnezia_host.sh`) - v0.3.0
-**Назначение:** Подготовка Debian 12/13 хоста под AmneziaVPN self-hosted (с тюнингом под каналы до 10 Гбит/с)
-- **Поддерживаемые ОС:** **Debian 12 (Bookworm)** и **Debian 13 (Trixie)**
-- **Особенности:** 10G sysctl (BBR, fq, 64MB буферы), Fish shell + Starship (Nerd Font preset), Debian Backports kernel (`--kernel-backports`), SSH hardening, swap 2GB, Fail2Ban (с python3-systemd), UFW (с forward ACCEPT), Docker CE (vanilla)
-- **Использование:** `sudo ./optimize_amnezia_host.sh --yes` (целевой пользователь — вызвавший `sudo`; от root без `sudo` укажи `--user "$OPERATOR"`)
+Все `optimize_*.sh` при настройке локалей генерируют `en_US.UTF-8` и `ru_RU.UTF-8`, чтобы SSH-сессии с английским или русским окружением работали без предупреждений `setlocale`. Amnezia-профиль делает это автоматически, сохраняя системный язык; в Mini PC и WSL2 шаг можно отключить. Выбор языка в VPS, Mini PC и WSL2 задает значение по умолчанию через `update-locale`, без постоянного `LC_ALL`. Для уже настроенного сервера см. [исправление ошибки локали](docs/README_AMNEZIA_HOST.md#ошибка-setlocale-при-входе-по-ssh).
 
-**Ключевые возможности:**
-- ⚡ **10 Gbps Networking** - BBR, fq pacing, адаптивные BDP буферы (32–64MB), очереди 32k, conntrack 262k
-- 🐟 **Fish + Starship** - интерактивный Fish со Starship (`nerd-font-symbols`), гибридный запуск (сохраняет `/bin/bash` как login shell для совместимости с Amnezia App)
-- 🚀 **Debian Backports kernel** - опциональная установка свежего официального ядра через `--kernel-backports`
-- 🐳 **Vanilla Docker CE** - установка без кастомного `daemon.json` и без systemd override
-- 💾 **Swap 2GB по умолчанию** - снижает риск OOM на VPS с небольшим RAM, отключается через `--skip-swap`
-- 👤 **Совместимость с app-checks** - целевой пользователь добавляется в группы `sudo` и `docker`
-- 👤 **Создание пользователя** - может создать нового operator user и добавить ему `authorized_keys` от invoking sudo user без дублей
-- 🔒 **Security baseline** - SSH hardening с выбором порта (`--ssh-port`), Fail2Ban для SSH (`backend = systemd`), UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"`, safe sudoers (`visudo -cf`), Loose `rp_filter = 2`
-- ⏱️ **Time sync preserve-first** - сохраняет уже установленный `chrony`/`ntpsec`/`ntp`/`openntpd`/`systemd-timesyncd`, ставит `systemd-timesyncd` только если daemon'а нет
-- 📡 **Two-phase firewall** - `bootstrap` для первичной установки через app и `locked` после фиксации `8443/udp`
-- 🚫 **Без лишнего** - не ставит AmneziaWG/XRay вручную, не тянет Node.js/fnm, Go и heavy VPS tuning
+## Быстрый старт
 
----
+> [!WARNING]
+> Скрипты меняют ядро, пользователей, sudoers, SSH, firewall и sysctl. Запускайте их только на целевой машине от root; на рабочей станции не запускайте ни от root, ни через `sudo`. Перед запуском сделайте снимок VM или бэкап. `bash <скрипт> --help` печатает справку без root и ничего не меняет.
 
-### 🏠 Mini PC Optimization (`optimize_mini_pc.sh`) - v2.0.0
-**Назначение:** Оптимизация медиа-серверов (Intel N5095 + 16GB RAM)
-- **Поддерживаемые ОС:** **Debian 12 (Bookworm)** и **Debian 13 (Trixie)**
-- **Особенности:** Debian Backports kernel, Fish + Starship, Intel QuickSync (GPU), Node.js/fnm, SSD тюнинг
-- **Использование:** `sudo ./optimize_mini_pc.sh`
+Команды ниже запускают текущую версию из `main`. `curl -fsSL` останавливается на ошибке HTTP, а шаги `optimize_vps.sh`, `optimize_mini_pc.sh` и `optimize_wsl2.sh` начинаются только после того, как скрипт загружен целиком: оборванная загрузка ничего не меняет.
 
-**Ключевые возможности:**
-- 🔧 **Kernel & Hardware:** Официальное ядро Debian Backports (`bookworm-backports`), CPU governor `schedutil`
-- 🎞️ **Media Server Pro:** QuickSync транскодинг, сетевые буферы 32MB для множественных стримов
-- 🐟 **Fish + Starship** - современный shell со Starship пресетом `nerd-font-symbols`, гибридный запуск через `.bashrc`
-- 💾 **Умный Swap:** 4GB (вместо 8GB) для 16GB RAM
-- 📡 **Сеть для стриминга:** TCP Fast Open, оптимизация для Plex/Jellyfin, Loose `rp_filter = 2`
-- 🐳 **Full Stack:** Docker, Go, Node.js/fnm, Fish + Starship
-- 📂 **Samba:** Безопасный файловый сервер для локальной сети (`server min protocol = SMB2`, NTLMv1 отключен)
-- 🛡️ **Security:** UFW, Fail2Ban (с `python3-systemd`), SSH Hardening, safe sudoers (`visudo -cf`)
-- ⏱️ **Time sync hardening:** обнаружение существующего NTP daemon + fallback на `systemd-timesyncd`
+> [!TIP]
+> Чтобы запустить закрепленный выпуск, замените в адресе `main` на его тег (см. [Версии и выпуски](#версии-и-выпуски)).
 
----
+### VPS
 
-### 🐧 WSL2 Optimization (`optimize_wsl2.sh`) - v4.1.0
-**Назначение:** Оптимизация WSL2 для ML/AI (i7-13700K + RTX 4090 + 32GB RAM)
-- **Поддерживаемые ОС:** Debian 12 (Bookworm) и Debian 13 (Trixie)
-- **Особенности:** Максимальная производительность для ML/AI, GPU computing, разработка, Node.js/fnm
-- **Использование:** `sudo ./optimize_wsl2.sh`
-
-**Ключевые возможности:**
-- 🐟 **Fish + Starship** - интерактивный Fish shell со Starship пресетом `nerd-font-symbols`, гибридный запуск через `.bashrc`
-- 🤖 **ML/AI Optimization:** Transparent Huge Pages, 64MB сетевые буферы, swappiness=1
-- 🎮 **RTX 4090 Ready:** CUDA оптимизации, unlimited memlock, shared memory 64GB
-- 🔧 WSL2 конфигурация (wsl.conf, systemd, автозапуск Docker)
-- 🪟 Windows интеграция (explorer, cmd, powershell)
-- 🐹 Go (закрепленная версия, SHA-256 из скрипта)
-- ⬢ Node.js + fnm (LTS, npm без sudo, auto-switching)
-- 🐳 Docker CE + NVIDIA Container Toolkit (официальный метод)
-- 🧩 Go и Node.js выбираются отдельными пунктами интерактивного меню
-- 🎨 **System info fallback** - `fastfetch` → `neofetch` → skip
-- 💾 **Агрессивный I/O:** NVMe nr_requests=2048, read-ahead 1024KB
-- 📊 WSL2-специфичные утилиты мониторинга
-- ✅ **CUDA:** Официальный метод NVIDIA (cuda-keyring + contrib repo)
-
-**⚠️ ВАЖНО:**
-- **Строгая проверка версии:** WSL2-скрипт работает только на Debian 12/13
-- **Debian 11 и non-Debian не поддерживаются**
-- **CUDA path выбирается автоматически:** `debian12` или `debian13`
-- **CUDA Toolkit ставится только через NVIDIA toolkit path:** широкий `cuda` metapackage в WSL не используется
-
----
-
-### ⬆️ Debian Upgrade to 13 (`upgrade-to-debian13.sh`) - v2.0.3
-**Назначение:** Безопасное обновление серверных Debian 11/12 инсталляций до Debian 13
-- **Поддерживаемые ОС:** **Debian 11 (bullseye)** и **Debian 12 (bookworm)**
-- **Ограничения:** Не предназначен для WSL2 и non-Debian систем
-- **Использование:** `sudo ./upgrade-to-debian13.sh` или `sudo ./upgrade-to-debian13.sh --yes`
-
-**Ключевые возможности:**
-- 🔄 **Маршрут обновления:** автоматический `11 → 12 → 13` или прямой `12 → 13` с явным предупреждением перед вторым major-hop
-- 📦 **APT deb822:** переписывание официальных Debian-источников в современном формате
-- 🧰 **Подготовка системы:** проверки диска, `dpkg --audit`, hold-пакетов, APT pinning
-- 🔒 **Безопасность:** отключение сторонних репозиториев и очистка `backports`/`proposed-updates`
-- 🔐 **Remote Access Safety:** сохраняет `/etc/ssh`, `authorized_keys`, состояние firewall и защищает критичные пакеты от `autoremove`
-- ✅ **Проверка SSH:** валидирует `sshd`, сервис `ssh` и прослушивание прежних портов после каждого major-step
-- ☁️ **Cloud VM Note:** скрипт не переписывает networking под конкретный cloud image и оставляет post-reboot network debugging на уровне VM
-- 🚨 **Cloud VPS Warning:** проблемы вида `networking.service failed` после ребута могут быть особенностью cloud image / VM, а не самого upgrade flow
-- 💾 **Резервное копирование:** бэкап APT-, SSH- и firewall-состояния в `/root/upgrade-backup-*`
-- 📝 **Подробный лог:** полный журнал выполнения в `/var/log/debian-upgrade/`
-
----
-
-## 🔄 Сравнение скриптов
-
-| Характеристика | VPS Optimization | Amnezia Host Baseline | Mini PC Optimization | WSL2 Optimization |
-|---------------|------------------|-----------------------|---------------------|-------------------|
-| **Целевое окружение** | VPS серверы | VPS под Amnezia app | Мини-ПК (Home/Media Server) | WSL2 |
-| **ОС** | **Debian 12/13** | **Debian 12/13** | **Debian 12/13** | **Debian 12/13** |
-| **Ядро** | Debian Backports (LTS) | Стандартное / Backports | Debian Backports (LTS) | WSL2 Linux Kernel |
-| **Shell** | **Fish + Starship** | **Fish + Starship** | **Fish + Starship** | **Fish + Starship** |
-| **Go** | Закрепленная версия ✅ | Нет | Закрепленная версия ✅ | Закрепленная версия ✅ |
-| **Node.js** | LTS + fnm ✅ | Нет | LTS + fnm ✅ | LTS + fnm ✅ |
-| **Docker** | Docker CE | Docker CE (опционально, vanilla) | Docker CE | Docker CE |
-| **GPU поддержка** | Нет | Нет | Intel QuickSync (транскодинг) | NVIDIA Container Toolkit + CUDA |
-| **System info** | - | - | - | **fastfetch → neofetch → skip** |
-| **CUDA метод** | - | - | - | **Официальный NVIDIA (cuda-keyring)** |
-| **Специфичные функции** | VPN оптимизация | **10G tuning** + Amnezia baseline | Media Server (Plex/Jellyfin) | explorer(), cmd(), powershell() |
-| **Swap** | Авто | 2GB по умолчанию | 4GB (для 16GB RAM) | Авто |
-| **systemd** | Полная поддержка | Полная поддержка | Полная поддержка | Полная поддержка |
-| **Безопасность** | SSH hardening, UFW, Fail2Ban | SSH hardening, UFW, Fail2Ban | UFW, Fail2Ban, SSH Hardening | Базовая безопасность |
-| **Samba** | Нет | Нет | Опционально ✅ | Нет |
-
----
-
-## 🚀 Быстрый старт
-
-`curl -fsSL` останавливается на ошибке HTTP, а шаги `optimize_vps.sh`, `optimize_mini_pc.sh` и `optimize_wsl2.sh` начинаются только после того, как скрипт загружен целиком: оборванная загрузка ничего не меняет. `bash <скрипт> --help` печатает справку без root и без изменений.
-
-Команды ниже запускают текущую версию из `main`. Чтобы запустить закрепленный выпуск, замените в адресе `main` на его тег (см. [Версии и выпуски](#версии-и-выпуски)).
-
-### Для VPS:
 ```bash
 # Быстрый запуск (bash + curl)
 bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
@@ -154,11 +52,12 @@ chmod +x optimize_vps.sh
 sudo ./optimize_vps.sh
 ```
 
-### Для AmneziaVPN host baseline:
+### AmneziaVPN host
+
 ```bash
 # Целевой пользователь: без --user это пользователь, запустивший sudo (SUDO_USER);
 # от root без sudo --user обязателен (root как целевой пользователь не допускается).
-# Задай имя оператора один раз (замени ops на своё):
+# Задайте имя оператора один раз (замените ops на свое):
 OPERATOR=ops
 
 # Быстрый запуск (bash + curl, под root)
@@ -171,7 +70,7 @@ chmod +x optimize_amnezia_host.sh
 # Рекомендуемый путь: подготовить host и сразу поставить vanilla Docker CE
 sudo ./optimize_amnezia_host.sh --yes
 
-# Если пользователя ещё нет, можно создать его сразу
+# Если пользователя нет, его можно создать сразу
 sudo ./optimize_amnezia_host.sh --user "$OPERATOR" --create-user \
   --ssh-public-key 'ssh-ed25519 AAAA... your-key' --yes
 
@@ -181,11 +80,12 @@ sudo ./optimize_amnezia_host.sh --skip-swap --yes
 # Альтернатива: оставить установку Docker самому приложению Amnezia
 sudo ./optimize_amnezia_host.sh --skip-docker --yes
 
-# После того как AmneziaWG закреплён на 8443/udp, можно ужесточить firewall
+# После того как AmneziaWG закреплен на 8443/udp, можно ужесточить firewall
 sudo ./optimize_amnezia_host.sh --firewall-phase locked --yes
 ```
 
-### Для Mini PC:
+### Mini PC
+
 ```bash
 # Быстрый запуск (bash + curl)
 bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh)
@@ -196,9 +96,10 @@ chmod +x optimize_mini_pc.sh
 sudo ./optimize_mini_pc.sh
 ```
 
-### Для WSL2:
+### WSL2
+
 ```bash
-# ⚠️ ВАЖНО: Используйте Debian 12 или Debian 13 под WSL2!
+# Только Debian 12 или Debian 13 под WSL2
 
 # Подготовка в Windows PowerShell
 wsl --update
@@ -213,7 +114,8 @@ chmod +x optimize_wsl2.sh
 sudo ./optimize_wsl2.sh
 ```
 
-### Для обновления Debian 11/12 → 13:
+### Обновление Debian 11/12 до 13
+
 ```bash
 # Быстрый запуск (bash + curl)
 bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh)
@@ -231,197 +133,63 @@ sudo ./upgrade-to-debian13.sh --yes
 sudo ./upgrade-to-debian13.sh --yes --allow-two-hop-no-reboot
 ```
 
----
+## Как работает скрипт
 
-## 📋 Подробная документация
-
-- **[VPS Documentation](docs/README_VPS.md)** - Полное руководство по VPS оптимизации
-- **[Amnezia Host Documentation](docs/README_AMNEZIA_HOST.md)** - Минимальный baseline под AmneziaVPN self-hosted через приложение
-- **[Mini PC Documentation](docs/README_MINI_PC.md)** - Руководство по настройке Intel N5095 (Jasper Lake)
-- **[WSL2 Documentation](docs/README_WSL2.md)** - Подробное руководство по WSL2 оптимизации
-- **[Debian Upgrade Documentation](docs/README_UPGRADE.md)** - Пошаговое описание обновления Debian 11/12 до 13
-
-## 🔧 Известные исправления
-
-### VSCode Terminal Error (все Remote расширения)
-При использовании VSCode Remote (WSL/SSH/Tunnels) может появиться ошибка:
-```
-__vsc_update_env:6: key: attempt to set associative array to scalar
+```mermaid
+flowchart TD
+    A["Загрузка целиком: curl -fsSL, bash читает весь файл"] --> B["Последняя строка вызывает optimize_main: шаги идут только из нее"]
+    B --> C{"root? Debian 12 или 13?"}
+    C -->|нет| X["Выход без изменений"]
+    C -->|да| D["Меню компонентов: gum или plain prompt"]
+    D --> E["Шаги (набор зависит от скрипта): пользователь и sudoers, локали, Fish + Starship, Go и Node.js, ядро, Docker, sysctl, swap, UFW, Fail2Ban, SSH"]
+    E --> F{"В рискованных шагах: sshd -t и sshd -T, visudo -cf, SHA-256 загрузок"}
+    F -->|расхождение| R["Шаг откатывается: drop-in SSH снимается, sudoers не меняется, файл не ставится"]
+    F -->|совпало| G["Итог и лог /var/log/*_optimization.log, предложение перезагрузки"]
 ```
 
-**Автоматически решено в скриптах:** Переход на Fish shell и чистый bashrc полностью устраняет конфликты `__vsc_update_env`.
+Так работают `optimize_mini_pc.sh` и `optimize_wsl2.sh` (WSL2 дополнительно проверяет, что это WSL; ядра, swap, UFW, Fail2Ban и закалки SSH у него нет — какие шаги есть у каждого скрипта, см. [Возможности](#возможности)). `optimize_vps.sh` меню компонентов не показывает: он спрашивает имя пользователя, ключ SSH, имя хоста, локаль и часовой пояс, ждет Enter после проверки входа по SSH, остальные шаги идут все. `optimize_amnezia_host.sh` берет параметры из флагов, подтверждает запуск (без `--yes`) и выполняет один фиксированный проход `main`. `upgrade-to-debian13.sh` идет своим маршрутом: проверки, бэкап в `/root/upgrade-backup-<TS>/`, шаги `11 -> 12` и `12 -> 13` с проверкой `sshd -t` и портов SSH после каждого, лог в `/var/log/debian-upgrade/`.
 
-**Если ошибка осталась:** Закройте все старые терминалы в VSCode и откройте новый (`Ctrl + ~`).
+TUI: основной backend — Charmbracelet `gum`; если его нет, он скачивается с проверкой SHA-256, а при неудаче используется plain Bash prompt. `dialog` и `whiptail` не выбираются автоматически и доступны только через явный `TUI_BACKEND=dialog|whiptail`.
 
-### npm EACCES Error
-При установке глобальных пакетов npm может возникнуть ошибка прав доступа.
+## Возможности
 
-**Автоматически исправлено в скриптах:** fnm устанавливается в user-local директории, что сохраняет корректные права доступа.
-Текущая реализация рассчитана на **чистую ОС** и не пытается мигрировать уже существующие NVM-конфигурации.
+| Возможность | VPS | Amnezia | Mini PC | WSL2 |
+|---|:---:|:---:|:---:|:---:|
+| Ядро Debian Backports на Debian 12 | ✅ | ✅ `--kernel-backports` | ✅ | — |
+| Fish + Starship (`nerd-font-symbols`), `/bin/bash` остается login shell | ✅ | ✅ | ✅ | ✅ |
+| sysctl: BBR + fq, Loose `rp_filter = 2` | ✅ | ✅ | ✅ | ✅ |
+| Буферы `rmem_max`/`wmem_max` | до 64 MB | 32–64 MB | 32 MB | 64 MB |
+| Docker CE + Compose plugin | ✅ | ✅ vanilla | ✅ | ✅ |
+| Закалка SSH: drop-in `00-*.conf`, проверка `sshd -T` | ✅ | ✅ | ✅ | — |
+| Fail2Ban (`backend = systemd`, `python3-systemd`) | ✅ | ✅ | ✅ | — |
+| UFW | ✅ | ✅ две фазы | ✅ | — |
+| UFW: `DEFAULT_FORWARD_POLICY="ACCEPT"` для VPN | ✅ | ✅ | — | — |
+| Swap-файл | по RAM | 2 GB | 4 GB при 12 GB+ RAM | — |
+| Синхронизация времени (существующий NTP или `systemd-timesyncd`) | ✅ | ✅ | ✅ | — |
+| Локали `en_US.UTF-8` + `ru_RU.UTF-8` | ✅ | ✅ | ✅ | ✅ |
+| Автообновления безопасности (`unattended-upgrades`) | ✅ | — | ✅ | ✅ |
+| CPU governor `schedutil` | ✅ | — | ✅ | — |
+| Go (закрепленная версия, SHA-256) | ✅ | — | ✅ | ✅ |
+| Node.js LTS через fnm | ✅ | — | ✅ | ✅ |
+| NVIDIA Container Toolkit + CUDA (`cuda-keyring`) | — | — | — | ✅ |
+| Intel QuickSync (`intel-media-va-driver-non-free`, `vainfo`) | — | — | ✅ | — |
+| Samba (`server min protocol = SMB2`) | — | — | ✅ по выбору | — |
+| Служебные скрипты (monitor, cleanup; info — VPS и Mini PC, backup — WSL2) | ✅ | — | ✅ | ✅ |
 
-**Ручное исправление (если нужно):**
-```bash
-sudo chown -R $(whoami):$(whoami) ~/.npm
-sudo chown -R $(whoami):$(whoami) ~/.local/share/fnm
-sudo chown -R $(whoami):$(whoami) ~/.config
-```
+Что ставит и настраивает каждый шаг, какие файлы пишет и как это откатить — в руководствах из раздела [Документация](#документация).
 
-### WSL2: Debian 12/13 support
-Текущая версия `optimize_wsl2.sh` поддерживает **Debian 12 (bookworm)** и **Debian 13 (trixie)**.
+## Безопасность
 
-**Что важно:**
-- CUDA repo path вычисляется автоматически: `debian12` или `debian13`
-- Для system info используется fallback `fastfetch -> neofetch -> skip`
-- `apt-transport-https` не требуется
-
-### CUDA Installation Fix (v3.0.0)
-Исправлена установка CUDA с использованием **официального метода NVIDIA**:
-- ✅ cuda-keyring_1.1-1_all.deb (рекомендованный метод)
-- ✅ Автоматическое включение contrib репозитория
-- ✅ CUDA repo path теперь выбирается динамически: `debian12` или `debian13`
-- ✅ Исправлены ошибки GPG ключей (404, missing key)
-
-### fastfetch / neofetch fallback
-Скрипт не жёстко зависит от одной утилиты и использует следующий порядок:
-- `fastfetch`, если пакет доступен
-- иначе `neofetch`
-- иначе пропуск без фатальной ошибки
-
-`fastfetch` остаётся предпочтительным вариантом:
-- ⚡ Быстрее (написан на C)
-- 🔄 Активно поддерживается
-- 🎨 Больше возможностей настройки
-- 📦 Официально доступен в Debian 13
-
----
-
-## 🛠️ Системные требования
-
-### Общие требования:
-- **ОС:** Linux (Debian/Ubuntu)
-- **Права:** root/sudo доступ
-- **Память:** Минимум 2GB RAM (рекомендуется 4GB+)
-- **Сеть:** Интернет соединение для загрузки пакетов
-
-### VPS специфичные:
-- **Архитектура:** x86_64 или arm64
-- **Хранилище:** Минимум 10GB свободного места
-
-### WSL2 специфичные:
-- **Windows 10/11** с WSL2
-- **WSL2 версия:** Последняя
-- **Debian:** **Debian 12 (Bookworm)** или **Debian 13 (Trixie)** под WSL2
-- **Драйверы:** NVIDIA с WSL поддержкой (опционально для GPU)
-
-### Скрипт обновления Debian:
-- **ОС:** Debian 11 (bullseye) или Debian 12 (bookworm)
-- **Тип системы:** серверная/минимальная Debian-инсталляция
-- **Права:** root/sudo доступ
-- **Хранилище:** минимум 5GB свободного места на `/`
-- **Важно:** в SSH-сессии рекомендуется `tmux` или `screen`
-- **Не поддерживается:** WSL2 и не-Debian окружения
-
----
-
-## 🔧 Особенности скриптов
-
-### VPS Optimization:
-- ✨ **Автоопределение системы** - CPU, RAM, архитектура
-- ✨ **Debian Backports kernel** - Свежее официальное LTS ядро Debian
-- ✨ **Безопасность** - SSH hardening, Fail2Ban, автообновления
-- ✨ **Производительность** - BBR, оптимизация памяти, I/O планировщики
-- ✨ **Мониторинг** - Встроенные скрипты наблюдения
-
-### WSL2 Optimization:
-- ✨ **Строгая проверка версии** - только Debian 12/13
-- ✨ **WSL2 оптимизация** - systemd, wsl.conf, Windows интеграция
-- ✨ **Go программирование** - закрепленная версия с проверкой SHA-256 из скрипта
-- ✨ **Node.js + fnm** - LTS версия, управление версиями, npm без sudo
-- ✨ **Интерактивное меню** - Выбор компонентов установки
-- ✨ **GPU поддержка** - NVIDIA Container Toolkit + CUDA (официальный метод)
-- ✨ **Производительность** - WSL2-специфичные настройки
-- ✨ **Удобство** - `fastfetch -> neofetch -> skip`, WSL2-функции, алиасы
-
----
-
-## 🐳 Docker и Контейнеризация
-
-Все скрипты включают установку и настройку Docker:
-
-### VPS:
-- Docker CE с последней версией
-- Docker Compose plugin
-- Оптимизация daemon.json
-- Автоматический запуск сервиса
-
-### WSL2:
-- Docker CE с интеграцией WSL2
-- **NVIDIA Container Toolkit** (официальный метод)
-- **CUDA Toolkit** опционально (cuda-keyring)
-- contrib репозиторий автоматически
-- Настройка для разработки
-
----
-
-## 🛠️ Безопасность
-
-### VPS Security:
-- SSH hardening (отключение root, только ключи)
-- Fail2Ban для защиты от брутфорса
-- Автоматические обновления безопасности
-- Настройка файрвола (UFW)
-
-### WSL2 Security:
-- Базовая безопасность (пользователь с sudo)
-- SSH agent конфигурация
-- Автоматические обновления
-
-### Сторонние загрузки (все скрипты):
+- Закалка SSH пишется в drop-in `/etc/ssh/sshd_config.d/00-*.conf`: sshd берет первое прочитанное значение, поэтому `50-cloud-init.conf` с `PasswordAuthentication yes` ее не отменяет. После `sshd -t` действующие значения сверяются через `sshd -T`; при расхождении drop-in снимается и sshd не перезапускается.
+- Файлы `/etc/sudoers.d/*` пишутся через временный файл с проверкой `visudo -cf`; при ошибке прежний файл остается без изменений.
 - Starship 1.27.0 (на Debian 13 — пакет `starship` из Debian), fnm 1.39.0, Go 1.27.3, gum 0.17.0 и `cuda-keyring` 1.1-1 закреплены по версии и SHA-256, записанной в скрипте; при несовпадении установка отклоняется. Исключение — Node.js: текущий LTS ставит fnm с nodejs.org по HTTPS, версия и сумма в репозитории не закреплены.
 - Ключи репозиториев Docker и NVIDIA Container Toolkit принимаются только с закрепленным отпечатком основного ключа.
 - Загрузки идут только по HTTPS (и при редиректах): каждая попытка — не дольше 15 минут (gum — 5), повторы начинаются только в пределах этого же времени, так что загрузка завершается не позже чем примерно через 30 минут (gum — 10). Временные файлы — в уникальных каталогах `mktemp -d`, которые удаляются после установки, при ошибке и при выходе скрипта, в том числе по сигналу.
-- Обновление версии: новые URL и SHA-256 из опубликованных проектом сумм — в `common_pinned_download` (`lib/common.sh`) и `tui_gum_sha256` (`lib/tui.sh`), затем те же тексты во встроенных копиях скриптов (`tests/test_embedded_copies.sh` проверяет совпадение).
+- `upgrade-to-debian13.sh` сохраняет `/etc/ssh`, `authorized_keys` и состояние firewall в `/root/upgrade-backup-<TS>/`, защищает пакеты удаленного доступа от `autoremove` и после каждого шага проверяет `sshd` и прослушивание прежних портов.
 
----
+Об уязвимости сообщайте приватно, как описано в [SECURITY.md](SECURITY.md), а не через публичный issue.
 
-## 📊 Мониторинг и Утилиты
-
-### VPS утилиты:
-- `vps-monitor.sh` - Системный мониторинг
-- `vps-cleanup.sh` - Очистка системы
-- `vps-info.sh` - Информация о системе
-- `network-test.sh` - Тестирование сети
-
-### WSL2 утилиты:
-- `wsl2-monitor.sh` - WSL2 мониторинг
-- `wsl2-cleanup.sh` - Очистка WSL2
-- `wsl2-backup.sh` - Резервное копирование
-- `fastfetch` / `neofetch` - Информация о системе (fallback)
-- WSL2-специфичные функции
-
----
-
-## 🔄 Обновления и Поддержка
-
-### Версионирование:
-- **Amnezia Host:** v0.3.0 - **Debian 12/13 support**, 10G sysctl, Fish + Starship (`nerd-font-symbols`), Debian Backports kernel, vanilla Docker CE, safe two-phase firewall
-- **VPS:** v3.0.0 - **Debian 12/13 support**, Debian Backports kernel, Fish + Starship (`nerd-font-symbols`), 10G sysctl, Fail2Ban с `python3-systemd`, persistent modules, fnm, Docker CE
-- **Mini PC:** v2.0.0 - **Debian 12/13 support**, Debian Backports kernel, Fish + Starship (`nerd-font-symbols`), Fail2Ban с `python3-systemd`, Media Server tuning, Intel QuickSync, fnm
-- **WSL2:** v4.1.0 - **Debian 12/13 support**, Fish + Starship (`nerd-font-symbols`), WSL interop functions, optional Go/Node menu toggles, safer CUDA Toolkit path
-- **Upgrade:** v2.0.3 - **Debian 11/12 → 13**, deb822, backup, SSH safety checks, no auto networking rewrites
-
-### Разработка и проверка:
-```bash
-for f in *.sh lib/*.sh tests/*.sh; do bash -n "$f" || echo "FAIL: $f"; done
-shellcheck -- *.sh lib/*.sh tests/*.sh
-for test in tests/*.sh; do bash "$test" || echo "FAIL: $test"; done
-```
-
-`bash -n` проверяет только первый переданный файл, поэтому синтаксис проверяется по одному файлу. Те же проверки выполняет CI (`.github/workflows/ci.yml`) на self-hosted раннере для push в `main` и PR владельца из этого же репозитория; для других источников проверка `checks` падает на GitHub-hosted раннере, не исполняя их код. Запуски из форков требуют одобрения владельца — не одобряйте их: PR из форка исполняет свой вариант workflow. Вклад из форка владелец проверяет, перенеся его в ветку этого репозитория.
-
-Внутренние helper'ы лежат в `lib/common.sh` и `lib/tui.sh`. TUI сделан в стиле `arch-linux-installer.sh`: основной backend — Charmbracelet `gum`, при необходимости он подтягивается автоматически с проверкой checksum; если `gum` недоступен, используется plain Bash prompt. `dialog`/`whiptail` не выбираются автоматически и доступны только через явный `TUI_BACKEND=dialog|whiptail`. Docker deb822 sources рендерятся через общий helper с `Architectures: $(dpkg --print-architecture)`.
-
-### Версии и выпуски
+## Версии и выпуски
 
 - `main` — текущая версия. В него попадают только PR, прошедшие проверку `checks`, и команды этого README запускают именно его.
 - Выпуск — снимок всех скриптов с тегом `vГГГГ.ММ.ДД` (второй выпуск за день — `vГГГГ.ММ.ДД.1`) и списком изменений на странице [Releases](https://github.com/snaplyze/optimize-debian/releases). Выпуски неизменяемы, а теги `v*` нельзя перенести или удалить, поэтому команда с тегом всегда запускает один и тот же код.
@@ -432,9 +200,10 @@ TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze
 bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_vps.sh")
 ```
 
-Версии в заголовках скриптов (например, VPS v3.0.0) относятся к отдельному скрипту, а тег выпуска — ко всему репозиторию.
+Версии в заголовках скриптов (например, WSL2 4.1.0) относятся к отдельному скрипту, а тег выпуска — ко всему репозиторию. История изменений — в [CHANGELOG.md](CHANGELOG.md).
 
-### Обновление:
+### Обновление
+
 ```bash
 # Текущая версия из main; чтобы скачать выпуск, замените main на его тег
 curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_amnezia_host.sh
@@ -444,126 +213,54 @@ curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/opti
 curl -fsSLO https://raw.githubusercontent.com/snaplyze/optimize-debian/main/upgrade-to-debian13.sh
 ```
 
----
+## Документация
 
-## 🤝 Сообщество
+- [docs/README.md](docs/README.md) — оглавление документации.
+- [docs/README_VPS.md](docs/README_VPS.md) — VPS: `optimize_vps.sh`.
+- [docs/README_AMNEZIA_HOST.md](docs/README_AMNEZIA_HOST.md) — хост AmneziaVPN: `optimize_amnezia_host.sh`.
+- [docs/README_MINI_PC.md](docs/README_MINI_PC.md) — мини-ПК Intel N5095: `optimize_mini_pc.sh`.
+- [docs/README_WSL2.md](docs/README_WSL2.md) — WSL2: `optimize_wsl2.sh`.
+- [docs/README_UPGRADE.md](docs/README_UPGRADE.md) — обновление Debian 11/12 до 13: `upgrade-to-debian13.sh`.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — устройство репозитория: встроенные копии `lib/`, `optimize_main`, тесты, CI, выпуски.
+- [CHANGELOG.md](CHANGELOG.md) — выпуски и история версий скриптов.
 
-### Поддержка:
-- **GitHub Issues** - Сообщения об ошибках
-- **GitHub Discussions** - Вопросы и предложения
-- **Pull Requests** - Вклад в разработку
+## Решение частых проблем
 
-### Лицензия:
-MIT License - свободное использование и модификация.
+<details>
+<summary>Ошибка терминала VSCode Remote: <code>__vsc_update_env</code></summary>
 
----
+При использовании VSCode Remote (WSL/SSH/Tunnels) может появиться ошибка:
 
-## 📝 История изменений
+```
+__vsc_update_env:6: key: attempt to set associative array to scalar
+```
 
-### Выпуск v2026.10.21 - 2026-10-21
-Первый закрепленный выпуск всего репозитория ([Releases](https://github.com/snaplyze/optimize-debian/releases/tag/v2026.10.21)), после аудита 2026-10-20 (`docs/plan.md`):
-- 🔒 SSH-закалка VPS, мини-ПК и Amnezia в drop-in `00-*.conf` со сверкой через `sshd -T`; закрепленные версии и SHA-256 для Starship, fnm, Go, gum и `cuda-keyring`, отпечатки ключей Docker и NVIDIA; атомарный sudoers
-- 🛡️ Шаги начинаются только после полной загрузки скрипта; `--help` без root; повторный запуск не плодит конфигурацию и не пересоздает swap нужного размера
-- ⬆️ `upgrade-to-debian13.sh`: источники старого релиза убираются, бэкап проверяется, порты SSH и права файлов сохраняются
-- 📚 Значения в документах приведены к коду; CI — обязательная проверка `checks` для `main`
+Скрипты решают это сами: переход на Fish shell и чистый `.bashrc` устраняет конфликты `__vsc_update_env`. Если ошибка осталась, закройте все старые терминалы в VSCode и откройте новый (`Ctrl + ~`).
 
-### Amnezia Host Baseline v0.3.0 (Текущая) - 2026-09-04
-- ⚡ **10 Gbps сетевой стек:** BBR, fq pacing, адаптивные BDP буферы (32–64MB), очереди пакетов (`netdev_max_backlog=32768`, `somaxconn=32768`), conntrack до 262k соединений, ulimits по nofile до 524k
-- 🐟 **Fish Shell + Starship:** интерактивный современный shell со Starship и пресетом `nerd-font-symbols`; гибридная интеграция через `~/.bashrc` сохраняет `/bin/bash` в `/etc/passwd`, предотвращая сбои Amnezia App при SSH-автоматизации
-- 🚀 **Debian Backports kernel:** опциональное официальное LTS ядро через `--kernel-backports` (amd64/arm64)
-- 🔒 **Security & Systemd:** Fail2Ban с установкой `python3-systemd` для journald на Debian 12/13, UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"` для бесшовной маршрутизации VPN
-- 🛡️ **Security Audit 2026:** атомарная валидация sudoers (`visudo -cf`), безопасное определение домашних каталогов (`getent passwd`), Loose `rp_filter = 2` для асимметричного VPN-роутинга, современный `KbdInteractiveAuthentication no`
-- ⚙️ **CLI флаги:** поддержка `--ssh-port`, `--xray-port`, `--amneziawg-port`, `--skip-fish`, `--kernel-backports` с валидацией портов
+</details>
 
-### VPS v3.0.0 (Текущая) - 2026-09-04
-- 🚀 **Debian Backports kernel:** замена XanMod на официальный репозиторий `bookworm-backports` (LTS ядро, полная поддержка amd64 и arm64)
-- 🐟 **Fish + Starship:** интерактивный современный shell со Starship (`nerd-font-symbols`), гибридный запуск через `~/.bashrc` (сохраняет `/bin/bash` в `/etc/passwd`)
-- ⚡ **10 Gbps сетевой стек:** адаптивные BDP буферы (rmem/wmem до 64MB), очереди `netdev_max_backlog=32768`, `somaxconn=32768`, conntrack до 262k
-- 🛡️ **Безопасность:** Fail2Ban с `python3-systemd`, UFW с `DEFAULT_FORWARD_POLICY="ACCEPT"`
-- 🔌 **Persistent Modules:** гарантированная загрузка `tcp_bbr`, `tun`, `wireguard` через `/etc/modules-load.d/`
-- 🔒 **Security Audit 2026:** атомарная валидация sudoers (`visudo -cf`), безопасный `getent passwd`, устранение `noexec` с `/tmp` tmpfs, Loose `rp_filter = 2`, современный `KbdInteractiveAuthentication no`, очистка скачанных архивов Go
+<details>
+<summary>npm EACCES при установке глобальных пакетов</summary>
 
-### Mini PC v2.0.0 (Текущая) - 2026-09-04
-- 🚀 **Debian Backports kernel:** замена XanMod на официальный `bookworm-backports` (amd64)
-- 🐟 **Fish + Starship:** переход на Fish shell с пресетом `nerd-font-symbols` и гибридным запуском через `~/.bashrc`
-- 🛡️ **Fail2Ban:** интеграция `python3-systemd` бэкенда
-- 🔒 **Security Audit 2026:** атомарная валидация sudoers (`visudo -cf`), устранение `noexec` с `/tmp`, Loose `rp_filter = 2`, отключение устаревшего NTLMv1 в Samba (`server min protocol = SMB2`), безопасный `getent passwd`
+Скрипты ставят fnm в каталог пользователя, поэтому права доступа остаются корректными. Реализация рассчитана на чистую ОС и не переносит уже существующие конфигурации NVM.
 
-### WSL2 v4.1.0 (Текущая) - 2026-09-04
-- 🐟 **Fish + Starship:** переход на Fish shell с пресетом `nerd-font-symbols` и гибридным запуском через `~/.bashrc`
-- 🪟 **WSL2 helpers в Fish:** нативные функции `explorer`, `cmd`, `powershell`, `wslperf`, `mkcd`
-- ⬢ **fnm интеграция:** хук `fnm env --use-on-cd --shell fish`
-- 🎮 **CUDA в Fish Shell:** автоматический экспорт `CUDA_HOME` и `LD_LIBRARY_PATH` в `config.fish`
-- 🔒 **Security Audit 2026:** атомарная валидация sudoers (`visudo -cf`), безопасное определение домашних каталогов (`getent passwd`) вместо `eval echo`, Loose `rp_filter = 2` для Docker и сетевых мостов
+Ручное исправление, если нужно:
 
-### WSL2 v4.0.0 (Архив) - 2026-05-11
-- ✅ **Опциональные dev toolchains:** Go и Node.js/fnm теперь выбираются отдельными пунктами меню
-- ✅ **WSL CUDA safety:** GPU preflight предупреждает, но не роняет весь скрипт; широкий `cuda` metapackage не ставится
-- ✅ **Shared helpers:** WSL config, Docker deb822 и unattended-upgrades рендерятся через общий `lib/common.sh`
-- ✅ **Gum TUI:** `gum`-style prompts как в `arch-linux-installer.sh`; без автоматического blue-screen `dialog`/`whiptail`
+```bash
+sudo chown -R $(whoami):$(whoami) ~/.npm
+sudo chown -R $(whoami):$(whoami) ~/.local/share/fnm
+sudo chown -R $(whoami):$(whoami) ~/.config
+```
 
-### WSL2 v3.0.0 (Архив) - 2026-02-03
-- ✅ **Debian 12/13 support:** bookworm и trixie
-- ✅ **CUDA официальный метод:** `cuda-keyring_1.1-1_all.deb` с dynamic distro path
-- ✅ **contrib репозиторий:** автоматическое включение
-- ✅ **System info fallback:** `fastfetch -> neofetch -> skip`
-- ❌ **Удалено:** `apt-transport-https` (устарел, встроен в apt)
+</details>
 
-### VPS v2.3.0 (Архив) - 2026-02-04
-- ✅ **Debian 12/13 support**
-- ✅ **Валидация username** с retry при ошибке (числовой, пустой, неверные символы)
-- 🔧 **Удалены дубликаты** функций (check_dialog)
-- ⚡ **Zsh Ultra-Fast** - fnm auto-switching, VPN-оптимизация
+<details>
+<summary>WSL2: CUDA, contrib и вывод сведений о системе</summary>
 
-### Mini PC v1.2.0 (Архив) - 2026-02-04
-- ✅ **Debian 12/13 support**
-- ✅ **Валидация username** с retry при ошибке
-- 🎞️ **Media Server Pro** - 32MB буферы, оптимизация для Plex/Jellyfin
-- 💾 **Умный Swap** - 4GB для 16GB RAM
+`optimize_wsl2.sh` работает только на Debian 12 и 13 под WSL2. Путь репозитория CUDA выбирается по `VERSION_ID`: `debian12` или `debian13`. Пакет `cuda-keyring` ставится официальным методом NVIDIA, а его SHA-256 сверяется с суммой, закрепленной в скрипте; широкий метапакет `cuda` в WSL не используется. Go и Node.js/fnm включаются отдельными пунктами меню; `apt-transport-https` не требуется.
 
-### Debian Upgrade v2.0.3 (Текущая) - 2026-04-03
-- ✨ **Новый скрипт обновления:** Debian 11/12 → Debian 13 (trixie)
-- ✅ **Двухшаговый маршрут:** `bullseye → bookworm → trixie` с явным предупреждением перед продолжением без ребута
-- ✅ **deb822-источники:** запись официальных APT sources в современном формате
-- ✅ **Проверки безопасности:** диск, `dpkg --audit`, hold-пакеты, pinning, сторонние репозитории
-- ✅ **Бэкап и логирование:** сохранение состояния в `/root/upgrade-backup-*` и `/var/log/debian-upgrade/`
-- ✅ **SSH/firewall safety:** сохранение `/etc/ssh`, `authorized_keys`, firewall-конфигов и защита пакетов от `autoremove`
-- ✅ **cloud image guidance:** notes про serial console / backup restore и про то, что `networking.service` проблемы могут быть VM-specific
+Что делает скрипт для CUDA, по шагам:
 
-### WSL2 v2.2.0 (Архив) - 2025-12-12
-- ⚡ **Zsh Ultra-Fast** - терминал загружается на 70-90% быстрее
-- 🤖 **ML/AI Optimization** - Transparent Huge Pages, 64MB буферы
-- 💾 **Агрессивный I/O** - NVMe: 2048 requests, 1024KB read-ahead
-
-### WSL2 v2.1.2 (Архив) - 2025-11-20
-- 🔧 WSL монтирование изменено: `/c/` → `/mnt/c/` (стандарт WSL)
-
-### WSL2 v2.1.0 (Архив) - 2025-11-19
-- ✨ **fnm** - единый Node manager для текущих скриптов
-- 🔧 **VSCode Terminal fix** - для Remote SSH/Tunnels
-- ✨ **npm без sudo** - fnm в user-local окружении
-
-### WSL2 v2.0.0 (Архив)
-- ✨ **Go установка** - последняя версия с SHA256 верификацией
-- ✨ **Node.js + fnm** - LTS версия
-- ✨ Создан WSL2 скрипт с Zsh + Starship
-- ✨ NVIDIA Container Toolkit + CUDA поддержка
-
----
-
-## ⚠️ Важные замечания
-
-### WSL2 v4.0.0 - Debian 12/13
-**Текущий подход:**
-1. поддерживаются Debian 12 и Debian 13;
-2. CUDA repo path выбирается по `VERSION_ID`;
-3. `fastfetch` используется только когда пакет доступен;
-4. fallback на `neofetch` не ломает запуск на Debian 12;
-5. Go и Node.js/fnm можно включать независимо;
-6. широкий WSL-пакет `cuda` не используется как fallback.
-
-### CUDA Installation
-Теперь используется **официальный метод NVIDIA**:
 ```bash
 # Включение contrib (обязательно для Debian)
 add-apt-repository contrib
@@ -578,15 +275,31 @@ apt update
 apt install cuda-toolkit
 ```
 
-### fastfetch vs neofetch
-Скрипт сначала пытается использовать **fastfetch**, затем **neofetch**, а если ни один пакет недоступен — просто пропускает этот шаг.
+Сведения о системе: скрипт сначала пытается использовать `fastfetch`, затем `neofetch`, а если ни один пакет недоступен — пропускает этот шаг без ошибки. `fastfetch` предпочтителен: написан на C, активно поддерживается, гибче настраивается и официально доступен в Debian 13.
 
-`fastfetch` остаётся предпочтительным вариантом:
-- Написан на C (намного быстрее)
-- Активно поддерживается
-- Больше возможностей настройки
-- Официально в репозиториях Debian 13
+</details>
 
----
+<details>
+<summary>Обновление до Debian 13 на облачной VM</summary>
 
-**Выберите подходящий скрипт для вашего окружения и начните оптимизацию уже сегодня!** 🚀
+`upgrade-to-debian13.sh` не переписывает настройку сети под конкретный cloud image. Ошибки вида `networking.service failed` после перезагрузки могут быть особенностью образа или VM, а не самого обновления; разбор идет на уровне VM (serial console, восстановление из `/root/upgrade-backup-*`). Подробнее — в [docs/README_UPGRADE.md](docs/README_UPGRADE.md).
+
+</details>
+
+## Участие в разработке
+
+Вопросы и ошибки — через [issues](https://github.com/snaplyze/optimize-debian/issues), уязвимости — по [SECURITY.md](SECURITY.md). Правила изменений, коммитов и PR — в [CONTRIBUTING.md](CONTRIBUTING.md), устройство репозитория — в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Проверка перед PR, из корня репозитория и не от root:
+
+```bash
+for f in *.sh lib/*.sh tests/*.sh; do bash -n "$f" || echo "FAIL: $f"; done
+shellcheck -- *.sh lib/*.sh tests/*.sh
+for test in tests/*.sh; do bash "$test" || echo "FAIL: $test"; done
+```
+
+`bash -n` проверяет только первый переданный файл, поэтому синтаксис проверяется по одному файлу. Те же проверки выполняет CI (`.github/workflows/ci.yml`) на self-hosted раннере для push в `main` и PR владельца из этого же репозитория; для других источников проверка `checks` падает на GitHub-hosted раннере, не исполняя их код. Запуски из форков требуют одобрения владельца — не одобряйте их: PR из форка исполняет свой вариант workflow. Вклад из форка владелец проверяет, перенеся его в ветку этого репозитория.
+
+Каждый `optimize_*.sh` работает одним файлом: `lib/common.sh` и `lib/tui.sh` подключаются, только если лежат рядом, иначе работают встроенные копии нужных функций. Изменение функции в `lib/` повторяется в копиях каждого скрипта; совпадение проверяет `tests/test_embedded_copies.sh`.
+
+## Лицензия
+
+MIT, см. [LICENSE](LICENSE).
