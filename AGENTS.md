@@ -13,7 +13,7 @@
   - `bash -c 'for t in tests/*.sh; do bash "$t" || exit 1; done'`
   - `git diff --check origin/main`
 
-  CI (`.github/workflows/ci.yml`) выполняет первые три проверки, а пробелы проверяет только в том, что добавляет PR: в старых файлах остались пробелы в конце строк. Временные файлы тестов — только через `mktemp` с удалением: фиксированный путь в общем `/tmp` у раннера под другим пользователем не записывается (`fs.protected_regular`), и тест проходит ложно.
+  CI (`.github/workflows/ci.yml`) выполняет первые три проверки. Пробелы в конце строк во всех текстовых файлах, ссылки и якоря Markdown и версии скриптов в таблице README проверяют тесты (`tests/test_repository_hygiene.sh`, `tests/test_docs_links.sh`). Временные файлы тестов — только через `mktemp` с удалением: фиксированный путь в общем `/tmp` у раннера под другим пользователем не записывается (`fs.protected_regular`), и тест проходит ложно.
 - План: `docs/plan.md` — реестр задач и запись хода; задачи и вехи GitHub Issues репозитория `snaplyze/optimize-debian` — его копия. Сначала обновляется план, затем трекер.
 - CI (обнаружено, 2026-10-20): `.github/workflows/ci.yml`, задание `checks` → self-hosted раннер `fedora-mini-s` (Fedora 44, Linux X64, раннер 2.338.0) с метками `[self-hosted, Linux, X64, fedora, project-optimize-debian]`; прогон занимает около 30 с; на раннере нет shellcheck — CI ставит закрепленный релиз сам; организации нет.
 - CI (владелец): self-hosted для подходящих заданий — задания, подходящие по меткам, ОС, архитектуре и возможностям, идут на self-hosted, остальные на hosted; подходящее задание на hosted — дефект для исправления. Раннер — по образцу `snaplyze/nucrix`, с меткой `project-<репозиторий>`. Репозиторий публичный: `runs-on` задания `checks` в `ci.yml` направляет на self-hosted только push владельца и PR владельца из этого же репозитория; любой другой источник получает задание на hosted-раннере, и его первый шаг падает до checkout — недоверенный код не проверяется и не исполняется, а `checks` красная, а не пропущенная. Но PR из форка исполняет свой `ci.yml` и может это условие убрать. Граница для форков — настройка репозитория «одобрение запусков для всех внешних участников» (включена владельцем 2026-10-20); запуск из форка не одобряй. Закрепление действий по SHA и список разрешенных действий GitHub здесь не проверяет (решение владельца) — следи за ними в `ci.yml` сам. Действия закрепляй по SHA коммита, инструменты — релизом с SHA-256 в `.github/<tool>.txt`.
@@ -43,8 +43,9 @@ The four `optimize_*.sh` scripts enforce Debian 12 or 13 at startup and exit imm
 - `lib/common.sh`: deb822 rendering, WSL config, username validation, unattended-upgrades templates, secure user home resolution (`common_user_home`), atomic sudoers validation (`common_safe_write_sudoers`), APT helpers (`common_apt_get`, `common_safe_install`, APT source enrichment), time sync, verified third-party downloads (`common_fetch_pinned` and the pins in `common_pinned_download`), Fish and Bash configs (`common_setup_fish`, `common_setup_bashrc`), SSH hardening checks (`common_sshd_effective_mismatches`).
 - `lib/tui.sh`: Charmbracelet `gum` installer, backend detection, and modal helpers.
 - `tests/`: automated Bash test suite covering hygiene, distro support, TUI, upgrade logic, and profile contracts.
-- `README.md`: top-level usage, quickstart, and feature matrix.
-- `docs/`: per-environment guides (`README_VPS.md`, `README_AMNEZIA_HOST.md`, `README_MINI_PC.md`, `README_WSL2.md`, `README_UPGRADE.md`).
+- `README.md`: top-level usage, quickstart, and feature matrix; `CHANGELOG.md`: releases and script version history (Keep a Changelog, section `[Не выпущено]` for merged but unreleased changes).
+- `docs/`: per-environment guides (`README_VPS.md`, `README_AMNEZIA_HOST.md`, `README_MINI_PC.md`, `README_WSL2.md`, `README_UPGRADE.md`), the index `docs/README.md`, `docs/ARCHITECTURE.md` (repository internals for contributors), `docs/plan.md` (task registry), images in `docs/assets/` (README banner, social preview).
+- Community files: `LICENSE` (MIT), `SECURITY.md` (private vulnerability reports through GitHub), `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue forms in `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`, `.editorconfig`.
 
 This project does not build artifacts. Runtime logs are written on target machines under `/var/log/` and must never be committed.
 
@@ -91,8 +92,9 @@ Documentation is part of the change. When behavior, supported OS versions, prere
 - update `README.md` (feature matrix and version table)
 - update the relevant file under `docs/`
 - update `docs/README_UPGRADE.md` when upgrade flow or supported Debian versions change
+- add a line to `## [Не выпущено]` in `CHANGELOG.md`
 
-Keep command examples copy-pasteable and keep version references aligned across files.
+Keep command examples copy-pasteable and keep version references aligned across files: a changed `SCRIPT_VERSION` goes to the README table «Какой скрипт выбрать» (checked by `tests/test_repository_hygiene.sh`). Guides keep the common section headings («Быстрый старт», «Параметры запуска», «Что делает скрипт», «Файлы, которые пишет скрипт», «Проверка после запуска», «Повторный запуск и откат», «Решение проблем»); headings carry no emoji, so their anchors stay predictable, and `tests/test_docs_links.sh` fails on a broken relative link or anchor. Documentation is written in Russian without «ё», like `docs/plan.md`.
 
 ## Commit & Pull Request Guidelines
 Use Conventional Commit prefixes (`feat:` new capabilities, `fix:` bug fixes, `docs:` README and guide updates) with concise imperative wording and the affected script named in the subject:
@@ -103,4 +105,4 @@ fix: remove redundant fi in upgrade-to-debian13.sh
 docs: update CUDA install notes in README_WSL2.md
 ```
 
-PRs should include purpose, affected script(s), target environment, manual validation performed, and rollback or safety notes. Terminal screenshots are optional; command output snippets are usually more useful.
+PRs should include purpose, affected script(s), target environment, manual validation performed, and rollback or safety notes (`.github/pull_request_template.md`). Terminal screenshots are optional; command output snippets are usually more useful.
