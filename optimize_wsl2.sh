@@ -1865,6 +1865,7 @@ Run it as root in the WSL2 distribution: it changes the system (packages, users,
 Options:
   -h, --help    Show this help and exit without changing anything
 USAGE
+    printf '\nVersion: %s\n' "$SCRIPT_VERSION"
 }
 
 # Every step runs from optimize_main, called on the last line: bash reads a whole function before

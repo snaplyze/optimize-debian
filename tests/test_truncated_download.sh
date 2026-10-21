@@ -69,14 +69,17 @@ test_truncated_script_changes_nothing() {
 
 test_help_without_root() {
     local script="$1"
-    local output status arg
+    local output status arg version
 
+    version="$(sed -n 's/^SCRIPT_VERSION="\(.*\)"$/\1/p' "$ROOT_DIR/$script")"
+    [ -n "$version" ] || fail "$script must set SCRIPT_VERSION"
     for arg in --help -h; do
         : > "$TEST_DIR/calls.log"
         status=0
         output="$(PATH="$TEST_DIR/bin:$PATH" bash "$ROOT_DIR/$script" "$arg" </dev/null 2>&1)" || status=$?
         [ "$status" -eq 0 ] || fail "$script $arg must exit 0, got $status: $output"
         grep -q '^Usage: sudo bash '"$script"'$' <<<"$output" || fail "$script $arg must print the usage: $output"
+        grep -Fqx "Version: $version" <<<"$output" || fail "$script $arg must print version $version: $output"
         [ ! -s "$TEST_DIR/calls.log" ] || fail "$script $arg must change nothing: $(head -n 3 "$TEST_DIR/calls.log")"
     done
 
