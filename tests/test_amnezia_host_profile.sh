@@ -414,6 +414,8 @@ test_create_user_new_user_branches() {
         run_status create_target_user_if_needed
         assert_failed "new user without a key source must fail with --yes"
         assert_out "Pass --ssh-public-key or --ssh-public-key-file" "missing key source hint"
+        assert_no_event_matches "^adduser"
+        [ ! -e "$T/user_exists" ] || die "no user may be created without a key source"
         [ ! -s "$(keys_file)" ] || die "no key may be written without a source"
 
         # Interactive without a key source: the pasted key is used, an empty answer fails.
@@ -421,12 +423,22 @@ test_create_user_new_user_branches() {
         ASSUME_YES=false
         run_status create_target_user_if_needed <<< "ssh-ed25519 AAAAPASTE paste@example"
         assert_rc 0 "interactive pasted key"
+        assert_before "adduser --gecos  --disabled-password ops" "chown ops:ops $(keys_file)"
         grep -Fxq "ssh-ed25519 AAAAPASTE paste@example" "$(keys_file)" || die "pasted key must be written"
         reset_user_case
         ASSUME_YES=false
         run_status create_target_user_if_needed <<< ""
         assert_failed "empty pasted key must fail"
         assert_out "cannot be empty" "empty pasted key message"
+        assert_no_event_matches "^adduser"
+        [ ! -e "$T/user_exists" ] || die "an empty pasted key must not leave a created user"
+        # End of input at the prompt is an empty answer with the same message.
+        reset_user_case
+        ASSUME_YES=false
+        run_status create_target_user_if_needed </dev/null
+        assert_failed "no answer at the key prompt must fail"
+        assert_out "cannot be empty" "key prompt at the end of input"
+        assert_no_event_matches "^adduser"
 
         # Invalid username: rejected before adduser runs.
         reset_user_case
