@@ -6,7 +6,7 @@
 
 | Скрипт | Версия | Debian | Права | Лог |
 |---|---|---|---|---|
-| `optimize_vps.sh` | 3.0.0 (`SCRIPT_VERSION`, печатает `--help`); закрепленный выпуск репозитория — `v2026.10.21` (см. [Версии и выпуски](../README.md#версии-и-выпуски)) | 12 (bookworm) или 13 (trixie); на других версиях скрипт завершается с кодом 1 | root (`EUID` 0), иначе код 1 | `/var/log/vps_optimization.log` — сообщения скрипта и вывод apt |
+| `optimize_vps.sh` | 3.0.0 (`SCRIPT_VERSION`, печатает `--help`); закрепленный выпуск репозитория — `v2026.10.21.1` (см. [Версии и выпуски](../README.md#версии-и-выпуски)) | 12 (bookworm) или 13 (trixie); на других версиях скрипт завершается с кодом 1 | root (`EUID` 0), иначе код 1 | `/var/log/vps_optimization.log` — сообщения скрипта и вывод apt |
 
 > [!WARNING]
 > Скрипт меняет ядро, пользователей, sudoers, SSH, firewall и sysctl. Запускайте его только на целевой машине и только от root. Перед запуском сделайте снимок (snapshot) VPS: полного отката одной командой нет. Не запускайте его на рабочей станции ни от root, ни через sudo. `--help` работает без root и ничего не меняет.
@@ -60,7 +60,7 @@ sudo ./optimize_vps.sh
 Закрепленный выпуск (см. [Версии и выпуски](../README.md#версии-и-выпуски)):
 
 ```bash
-TAG=v2026.10.21   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
+TAG=v2026.10.21.1   # последний выпуск: https://github.com/snaplyze/optimize-debian/releases/latest
 bash <(curl -fsSL "https://raw.githubusercontent.com/snaplyze/optimize-debian/$TAG/optimize_vps.sh")
 ```
 
