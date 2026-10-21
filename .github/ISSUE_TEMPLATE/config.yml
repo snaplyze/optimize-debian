@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Сообщить об уязвимости
+    url: https://github.com/snaplyze/optimize-debian/security/advisories/new
+    about: Только закрытая форма GitHub. Публичный issue для уязвимости не открывайте, см. SECURITY.md.
+  - name: Документация
+    url: https://github.com/snaplyze/optimize-debian/blob/main/docs/README.md
+    about: Руководства по VPS, хосту AmneziaVPN, мини-ПК, WSL2 и обновлению до Debian 13.

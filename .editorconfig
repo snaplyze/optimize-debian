@@ -1,0 +1,22 @@
+# Стиль файлов репозитория: см. AGENTS.md, раздел «Coding Style & Naming Conventions».
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.sh]
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+# Отступ не задан: в Markdown он зависит от конструкции (списки, блоки кода).
+
+[LICENSE]
+# Текст лицензии хранится как есть, с общими правилами из [*].
