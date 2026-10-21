@@ -64,7 +64,7 @@
 ### 2. Загрузка и запуск
 ```bash
 # Быстрый запуск (bash + curl)
-bash <(curl -s https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh)
 
 # Или скачать скрипт
 wget https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_mini_pc.sh

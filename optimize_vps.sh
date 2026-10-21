@@ -1866,13 +1866,44 @@ EOF
     log "SSH service restarted with new configuration"
 }
 
-# shellcheck disable=SC2317
-if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
-    return 0 2>/dev/null || exit 0
-fi
+print_usage() {
+    cat <<'USAGE'
+Usage: sudo bash optimize_vps.sh
+       bash <(curl -fsSL https://raw.githubusercontent.com/snaplyze/optimize-debian/main/optimize_vps.sh)
+
+VPS optimization for Debian 12 and 13: Debian Backports kernel on Debian 12, sysctl for 10G VPN
+traffic, Fish + Starship, Go, Node.js (fnm), Docker, SSH hardening, Fail2Ban and UFW.
+It asks for the user, the SSH key and the options interactively.
+Run it as root on the target machine: it changes the system (packages, kernel, users, sudoers,
+SSH, firewall, sysctl). Guide: https://github.com/snaplyze/optimize-debian/blob/main/docs/README_VPS.md
+
+Options:
+  -h, --help    Show this help and exit without changing anything
+USAGE
+}
+
+# Every step runs from optimize_main, called on the last line: bash reads a whole function before
+# running it, so a download cut short (bash <(curl ...)) stops with a syntax error before any
+# change. The body keeps the column it had at the top level, so the heredocs it writes stay as
+# they are.
+optimize_main() {
+case "${1:-}" in
+    -h|--help)
+        print_usage
+        exit 0
+        ;;
+    "")
+        ;;
+    *)
+        printf 'Unknown argument: %s\n\n' "$1" >&2
+        print_usage >&2
+        exit 2
+        ;;
+esac
+
 
 # Check if running as root
-if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" != "1" && $EUID -ne 0 ]]; then
+if [[ $EUID -ne 0 ]]; then
    error "This script must be run as root (use sudo)"
    exit 1
 fi
@@ -3505,3 +3536,10 @@ else
     warn "  - Test Fish: fish"
     warn "  - Test Docker: docker ps (should work without sudo)"
 fi
+}
+
+# shellcheck disable=SC2317
+if [[ "${OPTIMIZE_SOURCE_ONLY:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+optimize_main "$@"
