@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Behavioral tests for optimize_vps.sh: system limits, config backups, SSH hardening.
+# Behavioral tests for optimize_vps.sh: system limits, config backups, SSH hardening, swap file.
 # SC2016: case bodies are single-quoted on purpose, they run in a separate bash.
 # shellcheck disable=SC1091,SC2016
 set -euo pipefail
@@ -36,6 +36,7 @@ assert_out() { grep -Fq -- "$1" "$T/out" || die "$2: output lacks '$1': $(cat "$
 event_log() { tr "\n" "|" < "$EVENTS"; }
 assert_event() { grep -Fxq -- "$1" "$EVENTS" || die "missing event '$1' in: $(event_log)"; }
 assert_no_event() { ! grep -Fxq -- "$1" "$EVENTS" || die "unexpected event '$1' in: $(event_log)"; }
+assert_no_event_matches() { ! grep -Eq -- "$1" "$EVENTS" || die "unexpected event matches '$1' in: $(event_log)"; }
 assert_no_temp_leftovers() { [ -z "$(ls -A "$TMPDIR")" ] || die "temp files left behind: $(ls -A "$TMPDIR")"; }
 HEADER_EOF
 
@@ -381,6 +382,140 @@ test_ssh_hardening_step_stops_the_script() {
         fail "the SSH hardening step must stop the script on failure"
 }
 
+# Mocks for the swap step: the swap file and fstab live in the temporary tree, and the swap
+# binaries are scripts (SWAPON_BIN and the others are variables) over a registry of active swaps
+# ($SWAPS, lines "name bytes"). SWAPOFF_FAIL / FALLOCATE_FAIL make them fail.
+SWAP_MOCKS='
+    SWAPFILE_PATH="$T/swapfile"
+    FSTAB_FILE="$T/fstab"
+    SWAPS="$T/swaps"
+    : > "$SWAPS"
+    printf "UUID=abc / ext4 defaults 0 1\n" > "$FSTAB_FILE"
+    export EVENTS SWAPS
+    SWAPON_BIN="$T/swapon"
+    SWAPOFF_BIN="$T/swapoff"
+    MKSWAP_BIN="$T/mkswap"
+    FALLOCATE_BIN="$T/fallocate"
+    cat > "$SWAPON_BIN" <<"MOCK"
+#!/bin/sh
+case "$*" in
+    "--show=NAME --noheadings") awk "{ print \$1 }" "$SWAPS" ;;
+    "--show --noheadings --bytes") awk "{ print \$1, \"file\", \$2, 0, -2 }" "$SWAPS" ;;
+    /*) echo "swapon $1" >> "$EVENTS"; printf "%s %s\n" "$1" "$(stat -c %s "$1")" >> "$SWAPS" ;;
+    *) exit 2 ;;
+esac
+MOCK
+    cat > "$SWAPOFF_BIN" <<"MOCK"
+#!/bin/sh
+echo "swapoff $1" >> "$EVENTS"
+[ -z "${SWAPOFF_FAIL:-}" ] || { echo "swapoff: $1: Cannot allocate memory" >&2; exit 1; }
+awk -v p="$1" "\$1 != p" "$SWAPS" > "$SWAPS.new"
+mv "$SWAPS.new" "$SWAPS"
+MOCK
+    cat > "$MKSWAP_BIN" <<"MOCK"
+#!/bin/sh
+echo "mkswap $1" >> "$EVENTS"
+MOCK
+    cat > "$FALLOCATE_BIN" <<"MOCK"
+#!/bin/sh
+echo "fallocate $*" >> "$EVENTS"
+[ -z "${FALLOCATE_FAIL:-}" ] || exit 1
+truncate -s "$2" "$3"
+MOCK
+    chmod +x "$SWAPON_BIN" "$SWAPOFF_BIN" "$MKSWAP_BIN" "$FALLOCATE_BIN"
+    dd() {
+        local arg count=0 out=""
+        for arg in "$@"; do
+            case "$arg" in of=*) out="${arg#of=}" ;; count=*) count="${arg#count=}" ;; esac
+        done
+        event "dd count=$count"
+        truncate -s "${count}G" "$out"
+    }
+    # An active swap file of $1 (a size for truncate) with $2 lines in fstab.
+    seed_swapfile() {
+        local n
+        truncate -s "$1" "$SWAPFILE_PATH"
+        printf "%s %s\n" "$SWAPFILE_PATH" "$(stat -c %s "$SWAPFILE_PATH")" >> "$SWAPS"
+        for ((n = 0; n < $2; n++)); do printf "%s none swap sw 0 0\n" "$SWAPFILE_PATH" >> "$FSTAB_FILE"; done
+    }
+    fstab_swap_lines() { grep -c "^$SWAPFILE_PATH " "$FSTAB_FILE" || true; }
+    assert_one_fstab_line() {
+        [ "$(fstab_swap_lines)" = 1 ] || die "fstab must have exactly one swap file line: $(cat "$FSTAB_FILE")"
+        grep -Fxq "UUID=abc / ext4 defaults 0 1" "$FSTAB_FILE" || die "other fstab lines must stay: $(cat "$FSTAB_FILE")"
+    }
+'
+
+test_swap_active_file_of_the_right_size_is_kept() {
+    run_case "$SWAP_MOCKS"'
+        seed_swapfile 2G 2
+        inode="$(stat -c %i "$SWAPFILE_PATH")"
+        run_status setup_swap_file 2
+        assert_rc 0 "an active swap file of the right size"
+        assert_out "keeping it" "the kept swap file must be said"
+        assert_no_event_matches "^(swapoff|mkswap|swapon|fallocate|dd) "
+        [ "$(stat -c %i "$SWAPFILE_PATH")" = "$inode" ] || die "the swap file must not be recreated"
+        assert_one_fstab_line
+    '
+}
+
+test_swap_active_file_of_another_size_is_recreated() {
+    run_case "$SWAP_MOCKS"'
+        seed_swapfile 1G 1
+        run_status setup_swap_file 2
+        assert_rc 0 "an active swap file of another size"
+        [ "$(event_log)" = "swapoff $SWAPFILE_PATH|fallocate -l 2G $SWAPFILE_PATH|mkswap $SWAPFILE_PATH|swapon $SWAPFILE_PATH|" ] || \
+            die "expected swapoff, new file, mkswap, swapon in this order: $(event_log)"
+        [ "$(stat -c %s "$SWAPFILE_PATH")" = $((2 * 1024 * 1024 * 1024)) ] || die "the new swap file must have the new size"
+        [ "$(stat -c %a "$SWAPFILE_PATH")" = 600 ] || die "the swap file must be 600"
+        assert_one_fstab_line
+    '
+}
+
+test_swap_failed_swapoff_keeps_the_active_file() {
+    run_case "$SWAP_MOCKS"'
+        seed_swapfile 1G 1
+        export SWAPOFF_FAIL=1
+        run_status setup_swap_file 2
+        assert_rc 0 "a failed swapoff must not stop the script"
+        assert_out "Could not turn off" "the failed swapoff must be warned about"
+        assert_event "swapoff $SWAPFILE_PATH"
+        assert_no_event_matches "^(mkswap|swapon|fallocate|dd) "
+        [ "$(stat -c %s "$SWAPFILE_PATH")" = $((1024 * 1024 * 1024)) ] || die "the active swap file must stay as it was"
+        grep -Fxq "$SWAPFILE_PATH 1073741824" "$SWAPS" || die "the swap must stay active"
+        assert_one_fstab_line
+    '
+}
+
+test_swap_created_once_and_kept_on_a_second_run() {
+    run_case "$SWAP_MOCKS"'
+        run_status setup_swap_file 2
+        assert_rc 0 "no swap yet"
+        [ "$(event_log)" = "fallocate -l 2G $SWAPFILE_PATH|mkswap $SWAPFILE_PATH|swapon $SWAPFILE_PATH|" ] || \
+            die "expected a new file, mkswap, swapon: $(event_log)"
+        assert_no_event_matches "^swapoff "
+        assert_one_fstab_line
+        # The second run changes nothing.
+        : > "$EVENTS"
+        run_status setup_swap_file 2
+        assert_rc 0 "a second run"
+        assert_no_event_matches "^(swapoff|mkswap|swapon|fallocate|dd) "
+        assert_out "keeping it" "the second run must keep the swap file"
+        assert_one_fstab_line
+    '
+}
+
+test_swap_falls_back_to_dd() {
+    run_case "$SWAP_MOCKS"'
+        export FALLOCATE_FAIL=1
+        run_status setup_swap_file 2
+        assert_rc 0 "fallocate unavailable"
+        assert_event "dd count=2"
+        assert_event "mkswap $SWAPFILE_PATH"
+        assert_event "swapon $SWAPFILE_PATH"
+        assert_one_fstab_line
+    '
+}
+
 main() {
     test_removed_dead_helpers
     test_system_limits_single_idempotent_place
@@ -394,6 +529,11 @@ main() {
     test_ssh_hardening_replaces_the_legacy_dropin
     test_ssh_hardening_step_stops_the_script
     test_ssh_hardening_paths
+    test_swap_active_file_of_the_right_size_is_kept
+    test_swap_active_file_of_another_size_is_recreated
+    test_swap_failed_swapoff_keeps_the_active_file
+    test_swap_created_once_and_kept_on_a_second_run
+    test_swap_falls_back_to_dd
     printf 'PASS: %s\n' "$(basename "$0")"
 }
 
