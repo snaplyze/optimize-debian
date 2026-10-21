@@ -1386,8 +1386,8 @@ install_backports_kernel() {
     fi
 
     section "Debian Backports Kernel Installation"
-    local distro_version
-    distro_version="$(detect_debian_version)"
+    # main sources /etc/os-release and lets only Debian 12 and 13 through.
+    local distro_version="${VERSION_ID:-}"
     if [ "$distro_version" != "12" ]; then
         info "Debian $distro_version already includes a modern kernel; skipping backports kernel"
         return 0
