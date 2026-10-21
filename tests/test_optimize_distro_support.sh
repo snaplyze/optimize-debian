@@ -259,6 +259,35 @@ test_forbidden_patterns_hygiene() {
     if grep -Fq 'apt-cache search cuda | grep -q' "$ROOT_DIR/optimize_wsl2.sh"; then
         fail 'optimize_wsl2.sh must not probe CUDA packages with grep -q under pipefail'
     fi
+    # Downloads go through common_download / common_fetch_verified (tests/test_downloads.sh):
+    # nothing from the network is piped into a shell, wget is not used, temporary files come from
+    # mktemp rather than fixed /tmp paths, and every curl call is bounded in time.
+    for script in "${SCRIPTS[@]}" lib/common.sh lib/tui.sh; do
+        if grep -nE '(curl|wget)[^#]*\|[[:space:]]*(sudo[[:space:]]+)?(ba|z)?sh([[:space:]]|$)' "$ROOT_DIR/$script"; then
+            fail "$script must not pipe a download into a shell"
+        fi
+        if grep -nE '(^|[[:space:];|&(])wget[[:space:]]' "$ROOT_DIR/$script" | grep -vE 'common_safe_install|^[0-9]+:[[:space:]]*#'; then
+            fail "$script must download with curl through the shared helpers, not wget"
+        fi
+        # common_temp_dir removes its directories from an EXIT trap that a trap of the script
+        # itself would replace or skip.
+        if grep -nE '(^|[[:space:];])trap[[:space:]].*[[:space:]]EXIT([[:space:]]|$)' "$ROOT_DIR/$script" | grep -vE 'trap common_remove_temp_dirs EXIT|^[0-9]+:[[:space:]]*#'; then
+            fail "$script must not set an EXIT trap: common_temp_dir cleans up through its own"
+        fi
+        if grep -nE '/tmp/' "$ROOT_DIR/$script" | grep -vE '^[0-9]+:[[:space:]]*#'; then
+            fail "$script must create temporary files with mktemp, not fixed /tmp paths"
+        fi
+        if awk '
+            # Joins continued lines, then checks every curl command for --max-time.
+            /\\$/ { buf = buf substr($0, 1, length($0) - 1) " "; next }
+            { line = buf $0; buf = "" }
+            line ~ /^[[:space:]]*#/ { next }
+            line ~ /(^|[[:space:];|&(])curl[[:space:]]+-/ && line !~ /--max-time/ { print FILENAME ":" FNR ": " line; bad = 1 }
+            END { exit !bad }
+        ' "$ROOT_DIR/$script"; then
+            fail "$script has a curl call without --max-time"
+        fi
+    done
     if grep -RE 'eval echo "~' "$ROOT_DIR"/*.sh "$ROOT_DIR"/lib/*.sh; then
         fail 'scripts must not use eval echo "~" for home expansion; use common_user_home'
     fi

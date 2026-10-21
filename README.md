@@ -78,7 +78,7 @@
 - 🎮 **RTX 4090 Ready:** CUDA оптимизации, unlimited memlock, shared memory 64GB
 - 🔧 WSL2 конфигурация (wsl.conf, systemd, автозапуск Docker)
 - 🪟 Windows интеграция (explorer, cmd, powershell)
-- 🐹 Go (последняя версия, SHA256 верификация)
+- 🐹 Go (закрепленная версия, SHA-256 из скрипта)
 - ⬢ Node.js + fnm (LTS, npm без sudo, auto-switching)
 - 🐳 Docker CE + NVIDIA Container Toolkit (официальный метод)
 - 🧩 Go и Node.js выбираются отдельными пунктами интерактивного меню
@@ -123,7 +123,7 @@
 | **ОС** | **Debian 12/13** | **Debian 12/13** | **Debian 12/13** | **Debian 12/13** |
 | **Ядро** | Debian Backports (LTS) | Стандартное / Backports | Debian Backports (LTS) | WSL2 Linux Kernel |
 | **Shell** | **Fish + Starship** | **Fish + Starship** | **Fish + Starship** | **Fish + Starship** |
-| **Go** | Последняя версия ✅ | Нет | Последняя версия ✅ | Последняя версия ✅ |
+| **Go** | Закрепленная версия ✅ | Нет | Закрепленная версия ✅ | Закрепленная версия ✅ |
 | **Node.js** | LTS + fnm ✅ | Нет | LTS + fnm ✅ | LTS + fnm ✅ |
 | **Docker** | Docker CE | Docker CE (опционально, vanilla) | Docker CE | Docker CE |
 | **GPU поддержка** | Нет | Нет | Intel QuickSync (транскодинг) | NVIDIA Container Toolkit + CUDA |
@@ -331,7 +331,7 @@ sudo chown -R $(whoami):$(whoami) ~/.config
 ### WSL2 Optimization:
 - ✨ **Строгая проверка версии** - только Debian 12/13
 - ✨ **WSL2 оптимизация** - systemd, wsl.conf, Windows интеграция
-- ✨ **Go программирование** - Последняя версия с SHA256 верификацией
+- ✨ **Go программирование** - закрепленная версия с проверкой SHA-256 из скрипта
 - ✨ **Node.js + fnm** - LTS версия, управление версиями, npm без sudo
 - ✨ **Интерактивное меню** - Выбор компонентов установки
 - ✨ **GPU поддержка** - NVIDIA Container Toolkit + CUDA (официальный метод)
@@ -371,6 +371,12 @@ sudo chown -R $(whoami):$(whoami) ~/.config
 - Базовая безопасность (пользователь с sudo)
 - SSH agent конфигурация
 - Автоматические обновления
+
+### Сторонние загрузки (все скрипты):
+- Starship 1.27.0 (на Debian 13 — пакет `starship` из Debian), fnm 1.39.0, Go 1.27.3, gum 0.17.0 и `cuda-keyring` 1.1-1 закреплены по версии и SHA-256, записанной в скрипте; при несовпадении установка отклоняется. Исключение — Node.js: текущий LTS ставит fnm с nodejs.org по HTTPS, версия и сумма в репозитории не закреплены.
+- Ключи репозиториев Docker и NVIDIA Container Toolkit принимаются только с закрепленным отпечатком основного ключа.
+- Загрузки идут только по HTTPS (и при редиректах): каждая попытка — не дольше 15 минут (gum — 5), повторы начинаются только в пределах этого же времени, так что загрузка завершается не позже чем примерно через 30 минут (gum — 10). Временные файлы — в уникальных каталогах `mktemp -d`, которые удаляются после установки, при ошибке и при выходе скрипта, в том числе по сигналу.
+- Обновление версии: новые URL и SHA-256 из опубликованных проектом сумм — в `common_pinned_download` (`lib/common.sh`) и `tui_gum_sha256` (`lib/tui.sh`), затем те же тексты во встроенных копиях скриптов (`tests/test_embedded_copies.sh` проверяет совпадение).
 
 ---
 
@@ -543,8 +549,9 @@ MIT License - свободное использование и модифика�
 # Включение contrib (обязательно для Debian)
 add-apt-repository contrib
 
-# Установка keyring пакета (рекомендовано NVIDIA)
-wget https://developer.download.nvidia.com/compute/cuda/repos/debian${VERSION_ID}/x86_64/cuda-keyring_1.1-1_all.deb
+# Установка keyring пакета (рекомендовано NVIDIA); скрипт сверяет его SHA-256
+# с суммой, закрепленной для debian12 или debian13, и только затем устанавливает
+curl -fsSL -o cuda-keyring_1.1-1_all.deb https://developer.download.nvidia.com/compute/cuda/repos/debian${VERSION_ID}/x86_64/cuda-keyring_1.1-1_all.deb
 dpkg -i cuda-keyring_1.1-1_all.deb
 
 # Установка CUDA

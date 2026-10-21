@@ -478,6 +478,244 @@ if ! declare -F common_enrich_apt_components >/dev/null; then
     }
 fi
 
+if ! declare -F common_temp_dir >/dev/null; then
+    # common_temp_dir <variable> [parent]: a fresh directory from mktemp -d (inside <parent> when
+    # given) stored in <variable>. It is removed when the script exits, also on an error or a
+    # signal, unless the caller removed it first. The removal is an EXIT trap set here: an EXIT trap
+    # the caller set before stays and skips it, so the scripts set none of their own (hygiene test).
+    common_temp_dir() {
+        local __common_var="${1:-}" __common_parent="${2:-}" __common_dir
+
+        if [ -n "$__common_parent" ]; then
+            __common_dir="$(mktemp -d "$__common_parent/.optimize.XXXXXX")" || return 1
+        else
+            __common_dir="$(mktemp -d)" || return 1
+        fi
+        COMMON_TEMP_DIRS+=("$__common_dir")
+        if [ -z "$(trap -p EXIT)" ]; then
+            trap common_remove_temp_dirs EXIT
+        fi
+        printf -v "$__common_var" '%s' "$__common_dir"
+    }
+
+    # Removes the directories of common_temp_dir that are still there.
+    common_remove_temp_dirs() {
+        local dir
+
+        for dir in ${COMMON_TEMP_DIRS[@]+"${COMMON_TEMP_DIRS[@]}"}; do
+            [ ! -d "$dir" ] || rm -rf -- "$dir"
+        done
+        COMMON_TEMP_DIRS=()
+    }
+
+    # common_keep_temp_dir <dir>: <dir> of common_temp_dir is no longer removed on exit (it holds
+    # something the operator has to recover).
+    common_keep_temp_dir() {
+        local dir kept=()
+
+        for dir in ${COMMON_TEMP_DIRS[@]+"${COMMON_TEMP_DIRS[@]}"}; do
+            [ "$dir" = "${1:-}" ] || kept+=("$dir")
+        done
+        COMMON_TEMP_DIRS=(${kept[@]+"${kept[@]}"})
+    }
+
+    # common_download <url> <file>: HTTPS only, redirects included; every attempt is bounded in
+    # connection and total time, a few retries on transient errors start only within that total
+    # time, so a bad network fails within about twice COMMON_DOWNLOAD_MAX_TIME instead of hanging.
+    common_download() {
+        curl -fsSL --proto '=https' --proto-redir '=https' \
+            --connect-timeout "${COMMON_DOWNLOAD_CONNECT_TIMEOUT:-20}" \
+            --max-time "${COMMON_DOWNLOAD_MAX_TIME:-900}" \
+            --retry "${COMMON_DOWNLOAD_RETRIES:-3}" --retry-delay 3 \
+            --retry-max-time "${COMMON_DOWNLOAD_MAX_TIME:-900}" \
+            -o "$2" "$1"
+    }
+
+    # Third-party downloads pinned in the repository: "<url> <sha256>" of <tool> for a Debian
+    # architecture (dpkg --print-architecture). The sums come from the projects' published
+    # checksums (fnm publishes none: computed from the release asset); a new version needs new
+    # sums. Returns 1 when <tool> has no pin for the architecture.
+    common_pinned_download() {
+        case "${1:-}:${2:-}" in
+            starship:amd64) printf '%s %s\n' https://github.com/starship/starship/releases/download/v1.27.0/starship-x86_64-unknown-linux-gnu.tar.gz 3b94758850901717eb36aa1b53f8492c1322506ec6d41273bc6151e79ed8e4a1 ;;
+            starship:arm64) printf '%s %s\n' https://github.com/starship/starship/releases/download/v1.27.0/starship-aarch64-unknown-linux-musl.tar.gz 341f5cbf24699fa0b27ec88965ad25f862ea09e15d35a543fd6ffdff1d2aa00d ;;
+            fnm:amd64) printf '%s %s\n' https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-linux.zip 7807664f39d39fc518da1c35ba0181e4b3267603c4b1dedeb4b5fc6ae440a224 ;;
+            fnm:arm64) printf '%s %s\n' https://github.com/Schniz/fnm/releases/download/v1.39.0/fnm-arm64.zip 4eaff58b2c5bf30d0934027572dd0b5bbb60d2a1af309230b53662d4b1d45599 ;;
+            go:amd64) printf '%s %s\n' https://dl.google.com/go/go1.27.3.linux-amd64.tar.gz 65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40 ;;
+            go:arm64) printf '%s %s\n' https://dl.google.com/go/go1.27.3.linux-arm64.tar.gz a06e99309dbcbdca1a8ccd2282c3ee146e55930886e26b4f1193269587165f49 ;;
+            cuda-keyring-debian12:amd64) printf '%s %s\n' https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb e7f219eab6fe4819cdb5c15b98233dc3420302d9c00883219cd3d896857cf48d ;;
+            cuda-keyring-debian13:amd64) printf '%s %s\n' https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb d0d4ef986a44400f9db33c600ef33a985175e7cc63d805a10e1839c7a1e78f5f ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # common_fetch_verified <url> <sha256> <file>: downloads <url> into a fresh directory next to
+    # <file> and moves it there only when its SHA-256 is <sha256>: a partial or substituted download
+    # never reaches <file>, and a large download does not fill a RAM-backed /tmp.
+    common_fetch_verified() {
+        local url="${1:-}" expected="${2:-}" dest="${3:-}"
+        local tmp_dir actual
+
+        if [ -z "$url" ] || [ -z "$dest" ] || ! [[ "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+            error "A download needs a URL, a SHA-256 and a target file"
+            return 1
+        fi
+        common_temp_dir tmp_dir "$(dirname "$dest")" || return 1
+        if ! common_download "$url" "$tmp_dir/download"; then
+            rm -rf "$tmp_dir"
+            warn "Download failed: $url"
+            return 1
+        fi
+        actual="$(sha256sum "$tmp_dir/download" | awk '{print $1}')"
+        if [ "$actual" != "$expected" ]; then
+            rm -rf "$tmp_dir"
+            error "Checksum mismatch for $url: expected $expected, got ${actual:-nothing}"
+            return 1
+        fi
+        if ! mv -f "$tmp_dir/download" "$dest"; then
+            rm -rf "$tmp_dir"
+            error "Could not move the download of $url to $dest"
+            return 1
+        fi
+        rm -rf "$tmp_dir"
+    }
+
+    # common_fetch_pinned <tool> <file>: common_fetch_verified with the pin of <tool> for this
+    # machine's architecture.
+    common_fetch_pinned() {
+        local tool="${1:-}" dest="${2:-}"
+        local arch pin url sum
+
+        arch="$(dpkg --print-architecture 2>/dev/null)" || arch=""
+        if ! pin="$(common_pinned_download "$tool" "$arch")"; then
+            warn "No pinned $tool release for architecture ${arch:-unknown}"
+            return 1
+        fi
+        read -r url sum <<<"$pin"
+        common_fetch_verified "$url" "$sum" "$dest"
+    }
+
+    # common_fetch_pinned_binary <tool> <dir>: the <tool> binary from its pinned release archive
+    # (.tar.gz or .zip), checked and extracted to <dir>/<tool> with mode 755.
+    common_fetch_pinned_binary() {
+        local tool="${1:-}" dir="${2:-}"
+        local archive="$2/$1.download"
+        local status=0
+
+        common_fetch_pinned "$tool" "$archive" || return 1
+        case "$(common_pinned_download "$tool" "$(dpkg --print-architecture 2>/dev/null)")" in
+            *.zip\ *) unzip -q -o "$archive" "$tool" -d "$dir" || status=1 ;;
+            *.tar.gz\ *) tar -xzf "$archive" -C "$dir" "$tool" || status=1 ;;
+            *) status=1 ;;
+        esac
+        rm -f "$archive"
+        if [ "$status" -ne 0 ] || ! chmod 755 "$dir/$tool"; then
+            error "Could not extract $tool from its release archive"
+            return 1
+        fi
+    }
+
+    # common_install_starship: the Debian package when the release has one (Debian 13), otherwise
+    # the pinned release binary in /usr/local/bin. Returns 1 when starship could not be installed.
+    common_install_starship() {
+        local tmp_dir status=0
+
+        command -v starship >/dev/null 2>&1 && return 0
+        if common_package_available starship && common_safe_install starship && command -v starship >/dev/null 2>&1; then
+            return 0
+        fi
+
+        common_temp_dir tmp_dir || return 1
+        if ! common_fetch_pinned_binary starship "$tmp_dir" ||
+            ! install -m 755 "$tmp_dir/starship" "${COMMON_STARSHIP_BIN:-/usr/local/bin/starship}"; then
+            status=1
+        fi
+        rm -rf "$tmp_dir"
+        return "$status"
+    }
+
+    # Signing keys of third-party APT repositories pinned in the repository: "<url> <fingerprint>"
+    # of the primary key, as the vendors publish it. Returns 1 for an unknown name.
+    common_apt_key_pin() {
+        case "${1:-}" in
+            docker) printf '%s %s\n' https://download.docker.com/linux/debian/gpg 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ;;
+            nvidia-container-toolkit) printf '%s %s\n' https://nvidia.github.io/libnvidia-container/gpgkey C95B321B61E88C1809C4F759DDCAE044F796ECB0 ;;
+            *) return 1 ;;
+        esac
+    }
+
+    # common_install_apt_key <name> <keyring>: the signing key <name> of common_apt_key_pin,
+    # accepted only when the downloaded file holds exactly that primary key. A keyring ending in
+    # .asc keeps the armored key; any other name gets the binary form.
+    common_install_apt_key() {
+        local key_name="${1:-}" keyring="${2:-}"
+        local pin url fingerprint tmp_dir actual status=0
+
+        if ! pin="$(common_apt_key_pin "$key_name")" || [ -z "$keyring" ]; then
+            error "No pinned APT key named '$key_name'"
+            return 1
+        fi
+        read -r url fingerprint <<<"$pin"
+
+        common_temp_dir tmp_dir || return 1
+        if ! common_download "$url" "$tmp_dir/key"; then
+            rm -rf "$tmp_dir"
+            warn "Download failed: $url"
+            return 1
+        fi
+        mkdir -m 700 "$tmp_dir/gnupg"
+        actual="$(GNUPGHOME="$tmp_dir/gnupg" gpg --batch --show-keys --with-colons "$tmp_dir/key" 2>/dev/null |
+            awk -F: '$1 == "pub" { primary = 1 } $1 == "fpr" && primary { print $10; primary = 0 }')"
+        if [ "$actual" != "$fingerprint" ]; then
+            rm -rf "$tmp_dir"
+            error "The key at $url has fingerprint ${actual:-none}, expected $fingerprint"
+            return 1
+        fi
+        case "$keyring" in
+            *.asc) cp "$tmp_dir/key" "$tmp_dir/keyring" || status=1 ;;
+            *) GNUPGHOME="$tmp_dir/gnupg" gpg --batch --yes --dearmor -o "$tmp_dir/keyring" "$tmp_dir/key" || status=1 ;;
+        esac
+        if [ "$status" -ne 0 ] || ! install -m 644 "$tmp_dir/keyring" "$keyring"; then
+            rm -rf "$tmp_dir"
+            error "Could not write the APT key $keyring"
+            return 1
+        fi
+        rm -rf "$tmp_dir"
+    }
+
+    # common_install_go [prefix]: the pinned Go release in <prefix>/go (/usr/local/go). It is
+    # downloaded and unpacked in a directory inside <prefix>, so a noexec or RAM-backed /tmp does not
+    # matter, and swapped in by rename only after the check; a failed swap puts the old tree back.
+    common_install_go() {
+        local prefix="${1:-/usr/local}"
+        local work_dir
+
+        common_temp_dir work_dir "$prefix" || return 1
+        if ! common_fetch_pinned go "$work_dir/go.tar.gz" || ! tar -xzf "$work_dir/go.tar.gz" -C "$work_dir" ||
+            [ ! -f "$work_dir/go/bin/go" ]; then
+            rm -rf "$work_dir"
+            error "Could not download and unpack the pinned Go release"
+            return 1
+        fi
+        if [ -e "$prefix/go" ] && ! mv "$prefix/go" "$work_dir/go.previous"; then
+            rm -rf "$work_dir"
+            error "Could not move the installed Go in $prefix/go aside"
+            return 1
+        fi
+        if ! mv "$work_dir/go" "$prefix/go"; then
+            if [ -e "$work_dir/go.previous" ] && ! mv "$work_dir/go.previous" "$prefix/go"; then
+                common_keep_temp_dir "$work_dir"
+                error "Could not put the previous Go back; it is in $work_dir/go.previous"
+                return 1
+            fi
+            rm -rf "$work_dir"
+            error "Could not install Go into $prefix/go"
+            return 1
+        fi
+        rm -rf "$work_dir"
+    }
+fi
+
 if ! declare -F tui_detect_backend >/dev/null; then
     : "${GUM:=/usr/local/bin/gum}"
     : "${TUI_GUM_VERSION:=0.17.0}"
@@ -504,27 +742,60 @@ if ! declare -F tui_detect_backend >/dev/null; then
         esac
     }
 
+    # SHA-256 of the gum release archive for TUI_GUM_VERSION and an asset architecture, pinned in
+    # the repository from the release's checksums.txt; another version has no pin and is not installed.
+    tui_gum_sha256() {
+        case "${TUI_GUM_VERSION}:${1:-}" in
+            0.17.0:x86_64) printf '%s\n' 69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb ;;
+            0.17.0:arm64) printf '%s\n' b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c ;;
+            0.17.0:armv7) printf '%s\n' 25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2 ;;
+            *) return 1 ;;
+        esac
+    }
+
     tui_install_gum() {
-        local gum_dir tmp_dir os_name arch dl_url checksum_url gum_checksum gum_path
+        local gum_dir tmp_dir arch dl_url gum_checksum gum_path
+
         command -v curl >/dev/null 2>&1 || return 1
         command -v tar >/dev/null 2>&1 || return 1
         command -v sha256sum >/dev/null 2>&1 || return 1
+
+        arch="$(tui_gum_asset_arch)"
+        gum_checksum="$(tui_gum_sha256 "$arch")" || return 1
+        [ "$(uname -s)" = Linux ] || return 1
+
         gum_dir="$(dirname "$GUM")"
         mkdir -p "$gum_dir" 2>/dev/null || return 1
         [ -w "$gum_dir" ] || return 1
-        tmp_dir="$(mktemp -d)"
-        os_name="$(uname -s)"
-        arch="$(tui_gum_asset_arch)"
-        dl_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/gum_${TUI_GUM_VERSION}_${os_name}_${arch}.tar.gz"
-        checksum_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/checksums.txt"
-        if ! curl -Lsf "$dl_url" >"${tmp_dir}/gum.tar.gz"; then rm -rf "$tmp_dir"; return 1; fi
-        if ! curl -Lsf "$checksum_url" >"${tmp_dir}/checksums.txt"; then rm -rf "$tmp_dir"; return 1; fi
-        gum_checksum="$(awk -v f="$(basename "$dl_url")" '$2==f{print $1}' "${tmp_dir}/checksums.txt")"
-        if [ -z "$gum_checksum" ] || ! echo "$gum_checksum  ${tmp_dir}/gum.tar.gz" | sha256sum -c - >/dev/null 2>&1; then rm -rf "$tmp_dir"; return 1; fi
-        if ! tar -xf "${tmp_dir}/gum.tar.gz" --directory "$tmp_dir"; then rm -rf "$tmp_dir"; return 1; fi
+
+        tmp_dir="$(mktemp -d)" || return 1
+        dl_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/gum_${TUI_GUM_VERSION}_Linux_${arch}.tar.gz"
+
+        # HTTPS only and bounded in time, like common_download (lib/tui.sh does not need lib/common.sh).
+        if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 300 \
+            --retry 3 --retry-delay 3 --retry-max-time 300 -o "${tmp_dir}/gum.tar.gz" "$dl_url"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        if [ "$(sha256sum "${tmp_dir}/gum.tar.gz" | awk '{print $1}')" != "$gum_checksum" ]; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+
+        if ! tar -xf "${tmp_dir}/gum.tar.gz" --directory "$tmp_dir"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
         gum_path="$(find "$tmp_dir" -type f -executable -name "gum" -print -quit)"
-        if [ -z "$gum_path" ] || ! mv "$gum_path" "$GUM"; then rm -rf "$tmp_dir"; return 1; fi
-        chmod +x "$GUM" || { rm -rf "$tmp_dir"; return 1; }
+        if [ -z "$gum_path" ] || ! mv "$gum_path" "$GUM"; then
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        chmod +x "$GUM" || {
+            rm -rf "$tmp_dir"
+            return 1
+        }
+
         TUI_GUM_BIN="$GUM"
         rm -rf "$tmp_dir"
     }
@@ -1558,10 +1829,11 @@ if $INSTALL_FISH; then
     # Install Fish with availability check
     common_safe_install fish curl || warn "Fish shell prerequisites were not fully installed"
 
-    # Install Starship
-    if ! command -v starship >/dev/null 2>&1; then
-        curl -sS https://starship.rs/install.sh | sh -s -- -y
+    # Starship: the Debian package (Debian 13) or the pinned release checked by its SHA-256
+    if common_install_starship; then
         log "Starship prompt installed"
+    else
+        warn "Starship could not be installed"
     fi
 
     # Function to setup Fish for a user
@@ -2057,108 +2329,23 @@ if command -v starship >/dev/null 2>&1; then
 fi
 
 ################################################################################
-# 8. Go Installation (Latest Version)
+# 8. Go Installation (pinned release)
 ################################################################################
 if $INSTALL_GO; then
 section "${SYMBOL_PACKAGE} Go Installation"
 
-log "Installing Go (latest stable version)..."
+log "Installing Go (pinned release)..."
 
-# Install Go using curl and SHA256 verification
 install_go() {
     local go_version
-    local go_arch
-    local go_os="linux"
-    local go_download_url
-    local go_checksum_url
-    local go_expected_checksum
-    local temp_dir
-    local previous_pwd
 
-    cleanup_go_temp_dir() {
-        if [ -n "${temp_dir:-}" ] && [ -d "${temp_dir:-}" ]; then
-            rm -rf "$temp_dir"
-        fi
-    }
-
-    # Detect architecture
-    go_arch=$(uname -m)
-    case $go_arch in
-        x86_64)
-            go_arch="amd64"
-            ;;
-        aarch64)
-            go_arch="arm64"
-            ;;
-        *)
-            warn "Unsupported architecture: $go_arch"
-            return 1
-            ;;
-    esac
-
-    log "Detected architecture: $go_arch"
-
-    # Get latest Go version
-    log "Fetching latest Go version..."
-    go_version=$(curl -s https://go.dev/VERSION?m=text | head -1 | sed 's/go//')
-
-    if [ -z "$go_version" ]; then
-        go_version="1.25.4"  # fallback version
-        warn "Could not determine latest Go version, using fallback: $go_version"
-    fi
-
-    log "Latest Go version: $go_version"
-
-    # Build download URL
-    # Use dl.google.com for direct downloads (go.dev redirects and causes issues)
-    go_download_url="https://dl.google.com/go/go${go_version}.${go_os}-${go_arch}.tar.gz"
-    go_checksum_url="https://dl.google.com/go/go${go_version}.${go_os}-${go_arch}.tar.gz.sha256"
-
-    # Create temporary directory
-    temp_dir=$(mktemp -d)
-    previous_pwd=$(pwd)
-
-    # Download checksum
-    log "Downloading Go checksum..."
-    if ! curl -fsSL "$go_checksum_url" -o "$temp_dir/checksum.txt"; then
-        warn "Failed to download Go checksum"
-        cleanup_go_temp_dir
+    # The pinned Go release, checked against its SHA-256 and swapped in only after unpacking
+    if ! common_install_go; then
+        warn "Go installation failed"
         return 1
     fi
-
-    go_expected_checksum=$(cut -d' ' -f1 "$temp_dir/checksum.txt")
-    log "Expected checksum: $go_expected_checksum"
-
-    # Download Go
-    log "Downloading Go ${go_version} for ${go_arch}..."
-    if ! curl -fsSL "$go_download_url" -o "$temp_dir/go.tar.gz"; then
-        warn "Failed to download Go"
-        cleanup_go_temp_dir
-        return 1
-    fi
-
-    # Verify checksum
-    log "Verifying Go checksum..."
-    cd "$temp_dir"
-    if ! echo "$go_expected_checksum  go.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
-        warn "Go checksum verification failed"
-        cd "$previous_pwd" >/dev/null 2>&1 || true
-        cleanup_go_temp_dir
-        return 1
-    fi
-    cd "$previous_pwd" >/dev/null 2>&1 || true
-
-    log "Checksum verified successfully"
-
-    # Remove old Go if exists
-    if [ -d "/usr/local/go" ]; then
-        log "Removing old Go installation..."
-        rm -rf /usr/local/go
-    fi
-
-    # Extract and install Go
-    log "Installing Go to /usr/local/go..."
-    tar -C /usr/local -xzf "$temp_dir/go.tar.gz"
+    go_version="$(head -n 1 /usr/local/go/VERSION)"
+    go_version="${go_version#go}"
 
     # Add Go to PATH for all users via profile.d
     cat > /etc/profile.d/golang.sh <<'GOEOF'
@@ -2199,7 +2386,6 @@ BASHEOF
     export GOPATH=$HOME/go
     export PATH=$GOPATH/bin:$PATH
 
-    cleanup_go_temp_dir
     log "Go ${go_version} installed successfully"
     /usr/local/go/bin/go version
 }
@@ -2256,7 +2442,16 @@ install_fnm_for_user() {
 
     log "Installing fnm for user: $username"
 
-    local fnm_install_script="/tmp/fnm_install_${username}.sh"
+    local fnm_dir fnm_install_script
+    # The binary comes from the pinned fnm release; it and the setup script sit in a fresh
+    # directory in /tmp (not root's TMPDIR, which the user may not reach) that only root can
+    # write and the user can read.
+    if ! common_temp_dir fnm_dir /tmp || ! chmod 755 "$fnm_dir" || ! common_fetch_pinned_binary fnm "$fnm_dir"; then
+        [ -z "${fnm_dir:-}" ] || rm -rf "$fnm_dir"
+        warn "Could not fetch the pinned fnm release; skipping fnm for $username"
+        return 1
+    fi
+    fnm_install_script="$fnm_dir/fnm-setup.sh"
 
     cat > "$fnm_install_script" <<'FNMINSTALL'
 #!/bin/bash
@@ -2268,12 +2463,8 @@ export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 export XDG_RUNTIME_DIR="$XDG_STATE_HOME/fnm-runtime"
 
-# fnm installer requires curl + unzip
-command -v curl >/dev/null 2>&1 || { echo "curl is required"; exit 1; }
-command -v unzip >/dev/null 2>&1 || { echo "unzip is required"; exit 1; }
-
-# Install fnm without modifying shell rc files
-curl -fsSL https://fnm.vercel.app/install | bash -s -- --skip-shell
+# The fnm binary that the calling script checked against its pinned SHA-256
+install -D -m 755 "$3" "$XDG_DATA_HOME/fnm/fnm"
 
 # Make fnm available in this non-interactive shell
 export PATH="$XDG_DATA_HOME/fnm:$PATH"
@@ -2307,10 +2498,11 @@ FNMINSTALL
     chmod +x "$fnm_install_script"
 
     if [ "$username" = "root" ]; then
-        bash "$fnm_install_script" "$user_home" "$username"
+        bash "$fnm_install_script" "$user_home" "$username" "$fnm_dir/fnm"
     else
-        su - "$username" -c "bash '$fnm_install_script' '$user_home' '$username'"
+        su - "$username" -c "bash '$fnm_install_script' '$user_home' '$username' '$fnm_dir/fnm'"
     fi
+    rm -rf "$fnm_dir"
 
     local fnm_bin="$user_home/.local/share/fnm/fnm"
     if [ -x "$fnm_bin" ]; then
@@ -2402,8 +2594,11 @@ if $INSTALL_DOCKER; then
     common_safe_install ca-certificates curl gnupg || warn "Docker repository prerequisites were not fully installed"
 
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-    chmod a+r /etc/apt/keyrings/docker.asc
+    # Docker's GPG key, accepted only with its pinned fingerprint
+    if ! common_install_apt_key docker /etc/apt/keyrings/docker.asc; then
+        error "The Docker APT key could not be installed"
+        exit 1
+    fi
     DOCKER_ARCH="$(dpkg --print-architecture)"
 
     common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "/etc/apt/keyrings/docker.asc" > /etc/apt/sources.list.d/docker.sources
@@ -2504,12 +2699,15 @@ if $INSTALL_NVIDIA; then
     
     # Install NVIDIA Container Toolkit
     install -m 0755 -d /usr/share/keyrings
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
-        gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    
-    ARCH="$(dpkg --print-architecture)"
-    echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/${ARCH}/ /" | \
-        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    # The repository is added only with its key accepted by the pinned fingerprint; otherwise
+    # the toolkit package stays unavailable and its installation is skipped below.
+    if common_install_apt_key nvidia-container-toolkit /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg; then
+        ARCH="$(dpkg --print-architecture)"
+        echo "deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://nvidia.github.io/libnvidia-container/stable/deb/${ARCH}/ /" | \
+            tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    else
+        warn "The NVIDIA Container Toolkit key could not be installed; its repository is not added"
+    fi
 
     common_apt_sources_changed
     if common_apt_update "NVIDIA Container Toolkit repository refresh"; then
@@ -2631,61 +2829,22 @@ if $INSTALL_NVIDIA; then
             log "✓ contrib repository already enabled"
         fi
 
-        # Install cuda-keyring package (official method with robust error handling)
-        CUDA_KEYRING_DEB="cuda-keyring_1.1-1_all.deb"
-        CUDA_KEYRING_URL="https://developer.download.nvidia.com/compute/cuda/repos/${CUDA_DISTRO}/${CUDA_ARCH}/${CUDA_KEYRING_DEB}"
-        CUDA_KEYRING_PATH="/tmp/${CUDA_KEYRING_DEB}"
-
-        log "Downloading CUDA keyring package..."
-        log "URL: $CUDA_KEYRING_URL"
-
-        # Clean up any existing file
-        rm -f "$CUDA_KEYRING_PATH"
-
-        # Download with retry logic
+        # The cuda-keyring package pinned by its SHA-256 for this Debian release
         download_success=false
-        for attempt in 1 2 3; do
-            log "Download attempt $attempt/3..."
-            if wget --timeout=30 --tries=3 -q --show-progress "$CUDA_KEYRING_URL" -O "$CUDA_KEYRING_PATH" 2>&1 | tee -a "$LOG_FILE"; then
-                # Verify file was downloaded and is not empty
-                if [[ -f "$CUDA_KEYRING_PATH" ]] && [[ -s "$CUDA_KEYRING_PATH" ]]; then
-                    file_size=$(stat -c%s "$CUDA_KEYRING_PATH" 2>/dev/null)
-                    log "Downloaded file size: ${file_size} bytes"
-
-                    # Check if file is a valid deb package (should be at least 1KB)
-                    if [[ $file_size -gt 1024 ]]; then
-                        # Verify it's actually a .deb file
-                        if dpkg --info "$CUDA_KEYRING_PATH" >/dev/null 2>&1; then
-                            log "✓ File downloaded successfully and verified"
-                            download_success=true
-                            break
-                        else
-                            warn "Downloaded file is not a valid Debian package"
-                            warn "File content check: $(head -c 100 "$CUDA_KEYRING_PATH" 2>/dev/null | od -A x -t x1z -v | head -2)"
-                            rm -f "$CUDA_KEYRING_PATH"
-                        fi
-                    else
-                        warn "Downloaded file is too small (${file_size} bytes)"
-                        rm -f "$CUDA_KEYRING_PATH"
-                    fi
-                else
-                    warn "Downloaded file is missing or empty"
-                fi
-            else
-                warn "wget failed with exit code $?"
+        CUDA_KEYRING_DIR=""
+        if common_temp_dir CUDA_KEYRING_DIR; then
+            CUDA_KEYRING_PATH="$CUDA_KEYRING_DIR/cuda-keyring.deb"
+            log "Downloading the pinned CUDA keyring package for ${CUDA_DISTRO}..."
+            if common_fetch_pinned "cuda-keyring-${CUDA_DISTRO}" "$CUDA_KEYRING_PATH"; then
+                download_success=true
             fi
-
-            if [[ $attempt -lt 3 ]]; then
-                warn "Retrying in 3 seconds..."
-                sleep 3
-            fi
-        done
+        fi
 
         if [[ "$download_success" == "true" ]]; then
             log "Installing CUDA keyring package..."
             if dpkg -i "$CUDA_KEYRING_PATH" 2>&1 | tee -a "$LOG_FILE"; then
                 log "✓ CUDA keyring installed successfully"
-                rm -f "$CUDA_KEYRING_PATH"
+                rm -rf "$CUDA_KEYRING_DIR"
 
                 log "Updating APT repository cache..."
                 common_apt_sources_changed
@@ -2697,14 +2856,14 @@ if $INSTALL_NVIDIA; then
                 fi
             else
                 error "Failed to install CUDA keyring package (dpkg returned $?)"
-                rm -f "$CUDA_KEYRING_PATH"
+                rm -rf "$CUDA_KEYRING_DIR"
                 warn "CUDA installation will be skipped"
                 INSTALL_CUDA=false
             fi
         else
-            error "Failed to download CUDA keyring after 3 attempts"
-            error "URL: $CUDA_KEYRING_URL"
-            warn "Please check:"
+            [ -z "$CUDA_KEYRING_DIR" ] || rm -rf "$CUDA_KEYRING_DIR"
+            error "Could not get the pinned CUDA keyring package for ${CUDA_DISTRO} (see the message above)"
+            warn "If it was a download error, please check:"
             warn "  1. Internet connection"
             warn "  2. Repository availability"
             warn "  3. DNS resolution"

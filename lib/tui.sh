@@ -27,34 +27,42 @@ tui_gum_asset_arch() {
     esac
 }
 
+# SHA-256 of the gum release archive for TUI_GUM_VERSION and an asset architecture, pinned in
+# the repository from the release's checksums.txt; another version has no pin and is not installed.
+tui_gum_sha256() {
+    case "${TUI_GUM_VERSION}:${1:-}" in
+        0.17.0:x86_64) printf '%s\n' 69ee169bd6387331928864e94d47ed01ef649fbfe875baed1bbf27b5377a6fdb ;;
+        0.17.0:arm64) printf '%s\n' b0b9ed95cbf7c8b7073f17b9591811f5c001e33c7cfd066ca83ce8a07c576f9c ;;
+        0.17.0:armv7) printf '%s\n' 25711c2fbc6887cde79ed586972834121a04955968808dd688c688381ac50ab2 ;;
+        *) return 1 ;;
+    esac
+}
+
 tui_install_gum() {
-    local gum_dir tmp_dir os_name arch dl_url checksum_url gum_checksum gum_path
+    local gum_dir tmp_dir arch dl_url gum_checksum gum_path
 
     command -v curl >/dev/null 2>&1 || return 1
     command -v tar >/dev/null 2>&1 || return 1
     command -v sha256sum >/dev/null 2>&1 || return 1
 
+    arch="$(tui_gum_asset_arch)"
+    gum_checksum="$(tui_gum_sha256 "$arch")" || return 1
+    [ "$(uname -s)" = Linux ] || return 1
+
     gum_dir="$(dirname "$GUM")"
     mkdir -p "$gum_dir" 2>/dev/null || return 1
     [ -w "$gum_dir" ] || return 1
 
-    tmp_dir="$(mktemp -d)"
-    os_name="$(uname -s)"
-    arch="$(tui_gum_asset_arch)"
-    dl_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/gum_${TUI_GUM_VERSION}_${os_name}_${arch}.tar.gz"
-    checksum_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/checksums.txt"
+    tmp_dir="$(mktemp -d)" || return 1
+    dl_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/gum_${TUI_GUM_VERSION}_Linux_${arch}.tar.gz"
 
-    if ! curl -Lsf "$dl_url" >"${tmp_dir}/gum.tar.gz"; then
+    # HTTPS only and bounded in time, like common_download (lib/tui.sh does not need lib/common.sh).
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 20 --max-time 300 \
+        --retry 3 --retry-delay 3 --retry-max-time 300 -o "${tmp_dir}/gum.tar.gz" "$dl_url"; then
         rm -rf "$tmp_dir"
         return 1
     fi
-    if ! curl -Lsf "$checksum_url" >"${tmp_dir}/checksums.txt"; then
-        rm -rf "$tmp_dir"
-        return 1
-    fi
-
-    gum_checksum="$(awk -v f="$(basename "$dl_url")" '$2==f{print $1}' "${tmp_dir}/checksums.txt")"
-    if [ -z "$gum_checksum" ] || ! echo "$gum_checksum  ${tmp_dir}/gum.tar.gz" | sha256sum -c - >/dev/null 2>&1; then
+    if [ "$(sha256sum "${tmp_dir}/gum.tar.gz" | awk '{print $1}')" != "$gum_checksum" ]; then
         rm -rf "$tmp_dir"
         return 1
     fi
