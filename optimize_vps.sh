@@ -2114,10 +2114,10 @@ echo ""
 USER_WAS_CREATED=false
 while true; do
     read -r -p "Enter new username: " NEW_USER
-    
+
     validate_username "$NEW_USER"
     validation_result=$?
-    
+
     if [ $validation_result -eq 0 ]; then
         break
     else
@@ -2258,7 +2258,7 @@ echo ""
     echo "1) en_US.UTF-8 (English)"
     echo "2) ru_RU.UTF-8 (Russian)"
     echo "3) Both (en_US.UTF-8 as default)"
-    
+
     if ! LOCALE_CHOICE=$(tui_radiolist "Default Locale" "Select default language (both UTF-8 locales will be generated):" 15 60 3 "1" "English (en_US.UTF-8)" on "2" "Russian (ru_RU.UTF-8)" off "3" "Both (English as default)" off); then
         read -r -p "Enter choice [1-3]: " LOCALE_CHOICE
     fi
@@ -3326,7 +3326,7 @@ common_safe_install linux-cpupower || warn "linux-cpupower was not installed, CP
 if [ -d /sys/devices/system/cpu/cpu0/cpufreq ]; then
     # Detect best available governor
     AVAILABLE_GOVERNORS=$(cpupower frequency-info -g 2>/dev/null | grep "available cpufreq governors:" | cut -d: -f2)
-    
+
     if [[ "$AVAILABLE_GOVERNORS" == *"schedutil"* ]]; then
         GOVERNOR="schedutil"
     elif [[ "$AVAILABLE_GOVERNORS" == *"powersave"* ]]; then

@@ -2082,7 +2082,7 @@ section "${SYMBOL_GEAR} WSL2 Configuration"
 
 if $CONFIGURE_WSL_CONF; then
     progress "Creating optimized /etc/wsl.conf..."
-    
+
     # Backup existing wsl.conf
     if [ -f /etc/wsl.conf ]; then
         cp /etc/wsl.conf "/etc/wsl.conf.backup.$(date +%F)" || true
@@ -2107,7 +2107,7 @@ section "${SYMBOL_PACKAGE} System Update & Packages"
 
 if $UPDATE_SYSTEM; then
     progress "Updating system packages..."
-    
+
     # Enrich APT components
     if ! common_enrich_apt_sources; then
         error "Failed while rewriting APT source files"
@@ -2117,7 +2117,7 @@ if $UPDATE_SYSTEM; then
     # Update package lists once, then upgrade
     common_apt_update "system update"
     common_apt_get upgrade -y >/dev/null 2>&1
-    
+
     log "System updated successfully"
 else
     info "Skipping system update"
@@ -2125,7 +2125,7 @@ fi
 
 if $INSTALL_BASE_UTILS; then
     subsection "Base Development Utilities"
-    
+
     # Optimized package list based on recommendations:
     # - Removed: wget (duplicates curl), make/gcc/g++ (in build-essential)
     # - Removed: iotop, sysstat, net-tools, xdg-user-dirs (not needed in WSL2)
@@ -2134,46 +2134,46 @@ if $INSTALL_BASE_UTILS; then
     base_packages=(
         # Network & Downloads
         "curl"                    # HTTP client (kept)
-        
+
         # Version Control
         "git"                     # Essential
-        
+
         # Monitoring
         "htop"                    # Process monitor
-        
+
         # Build Tools
         "build-essential"         # Includes: gcc, g++, make
         "cmake"                   # Build system
-        
+
         # Python
         "python3"                 # Python interpreter
         "python3-pip"             # Package manager
         "python3-venv"            # Virtual environments
-        
+
         # Modern Search Tools
         "fzf"                     # Fuzzy finder
         "ripgrep"                 # Fast grep (rg)
         "fd-find"                 # Fast find (fd)
-        
+
         # File Utilities
         "tree"                    # Directory tree view
         "jq"                      # JSON processor
         "file"                    # File type detection
         "ncdu"                    # Disk usage analyzer (NEW)
-        
+
         # Archives
         "unzip"                   # ZIP extraction
         "zip"                     # ZIP creation
         "xz-utils"                # XZ compression
-        
+
         # Security
         "gnupg"                   # GPG encryption
         "ca-certificates"         # SSL certificates
-        
+
         # System Info
         "lsb-release"             # Distro info
         "bc"                      # Calculator
-        
+
         # Editors & Terminal (NEW)
         "neovim"                  # Modern text editor
         "tmux"                    # Terminal multiplexer (critical for WSL2!)
@@ -2184,7 +2184,7 @@ if $INSTALL_BASE_UTILS; then
     while IFS= read -r fetch_pkg; do
         [ -n "$fetch_pkg" ] && base_packages+=("$fetch_pkg")
     done < <(resolve_fetch_packages)
-    
+
     progress "Installing ${#base_packages[@]} base packages..."
     common_safe_install "${base_packages[@]}" || warn "Some base packages were not installed, continuing"
 
@@ -2192,11 +2192,11 @@ if $INSTALL_BASE_UTILS; then
     if command -v batcat >/dev/null 2>&1 && ! command -v bat >/dev/null 2>&1; then
         ln -sf "$(command -v batcat)" /usr/local/bin/bat 2>/dev/null || true
     fi
-    
+
     if command -v fdfind >/dev/null 2>&1 && ! command -v fd >/dev/null 2>&1; then
         ln -sf "$(command -v fdfind)" /usr/local/bin/fd 2>/dev/null || true
     fi
-    
+
     log "Base utilities configured"
 else
     info "Skipping base utilities installation"
@@ -2210,22 +2210,22 @@ section "${SYMBOL_GEAR} User Management"
 # Username validation function
 validate_username() {
     local username="$1"
-    
+
     # Empty username
     [[ -z "$username" ]] && return 1
-    
+
     # Only digits (not allowed by Linux)
     [[ "$username" =~ ^[0-9]+$ ]] && return 2
-    
+
     # Starts with digit or dash
     [[ "$username" =~ ^[-0-9] ]] && return 3
-    
+
     # Contains invalid characters (only lowercase, digits, underscore, dash allowed)
     [[ ! "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] && return 4
-    
+
     # Too long (max 32)
     [[ ${#username} -gt 32 ]] && return 5
-    
+
     return 0
 }
 
@@ -2234,10 +2234,10 @@ if $CREATE_USER; then
     # Username input with validation and retry
     while true; do
         read -r -p "Enter new username: " NEW_USER
-        
+
         validate_username "$NEW_USER"
         validation_result=$?
-        
+
         if [ $validation_result -eq 0 ]; then
             break
         else
@@ -2252,7 +2252,7 @@ if $CREATE_USER; then
             echo ""
         fi
     done
-    
+
     if id "$NEW_USER" &>/dev/null; then
         warn "User $NEW_USER already exists. Skipping creation but will configure..."
         # Offer to change password for existing user
@@ -2361,20 +2361,20 @@ section "${SYMBOL_GEAR} System Localization"
 
 if $CONFIGURE_LOCALES; then
     log "Configuring system locales..."
-    
+
     # Install locales package with availability check
     common_safe_install locales || warn "locales package was not installed, locale generation may fail"
-    
+
 # Locale selection
     echo "Select default system locale (English and Russian UTF-8 are always generated):"
     echo "1) en_US.UTF-8 (English)"
     echo "2) ru_RU.UTF-8 (Russian)"
     echo "3) Both (en_US.UTF-8 as default)"
-    
+
     if ! LOCALE_CHOICE=$(tui_radiolist "Default Locale" "Select default language (both UTF-8 locales will be generated):" 15 60 3 "1" "English (en_US.UTF-8)" on "2" "Russian (ru_RU.UTF-8)" off "3" "Both (English as default)" off); then
         read -r -p "Enter choice [1-3]: " LOCALE_CHOICE
     fi
-    
+
     case $LOCALE_CHOICE in
         1)
             DEFAULT_LOCALE="en_US.UTF-8"
@@ -2390,7 +2390,7 @@ if $CONFIGURE_LOCALES; then
             DEFAULT_LOCALE="en_US.UTF-8"
             ;;
     esac
-    
+
     # Support both SSH client locales regardless of the selected default language.
     common_generate_utf8_locales /etc/locale.gen
     # Debian 12 uses /etc/default/locale; Debian 13 uses /etc/locale.conf.
@@ -2730,16 +2730,16 @@ section "${SYMBOL_GEAR} SSH Agent Configuration"
 
 if $CONFIGURE_SSH_AGENT; then
     log "Configuring SSH agent for WSL2..."
-    
+
     # Install openssh-client with availability check
     common_safe_install openssh-client || warn "openssh-client was not installed"
-    
+
     if has_user_systemd; then
         log "Enabling ssh-agent.socket via systemd..."
         systemctl --user enable --now ssh-agent.socket || warn "Failed to enable ssh-agent.socket"
     else
         log "Configuring ssh-agent via profile..."
-        
+
         # write literal $USER for runtime expansion in user shell
         # shellcheck disable=SC2016
         PROFILE_SNIPPET='# WSL2: автозапуск ssh-agent (без systemd)
@@ -2747,7 +2747,7 @@ if ! pgrep -u "$USER" ssh-agent >/dev/null 2>&1; then
   eval "$(ssh-agent -s)" >/dev/null
 fi
 '
-        
+
         for f in "/home/$DOCKER_USER/.bash_profile" "/home/$DOCKER_USER/.profile" "/home/$DOCKER_USER/.zprofile"; do
             [ -f "$f" ] || touch "$f"
             if ! grep -F "WSL2: автозапуск ssh-agent" "$f" >/dev/null 2>&1; then
@@ -2756,7 +2756,7 @@ fi
             fi
         done
     fi
-    
+
     log "SSH agent configuration completed"
 else
     log "Skipping SSH agent configuration"
@@ -2848,7 +2848,7 @@ section "${SYMBOL_GEAR} NVIDIA Support Installation"
 
 if $INSTALL_NVIDIA; then
     log "Installing NVIDIA Container Toolkit..."
-    
+
     # Check GPU status
     gpu_status_wsl() {
         local ok_flag=0
@@ -2866,7 +2866,7 @@ if $INSTALL_NVIDIA; then
             echo " - nvidia-smi: not found in Linux environment"
             ok_flag=1
         fi
-        
+
         if [ $ok_flag -ne 0 ]; then
             warn "GPU may not be available. Installation will continue but may not work properly."
             warn "Tips:"
@@ -2876,9 +2876,9 @@ if $INSTALL_NVIDIA; then
         fi
         return $ok_flag
     }
-    
+
     gpu_status_wsl || true
-    
+
     # Install NVIDIA Container Toolkit
     install -m 0755 -d /usr/share/keyrings
     # The repository is added only with its key accepted by the pinned fingerprint; otherwise
@@ -2969,7 +2969,7 @@ if $INSTALL_NVIDIA; then
     else
         warn "nvidia-ctk not found - installation may have failed"
     fi
-    
+
     # Install CUDA Toolkit if requested
     if $INSTALL_CUDA; then
         log "Installing CUDA Toolkit..."
@@ -3073,7 +3073,7 @@ if $INSTALL_NVIDIA; then
             fi
         fi  # End of: if $INSTALL_CUDA (package installation check)
     fi  # End of: if $INSTALL_CUDA
-    
+
     # Configure CUDA environment variables (MOVED OUTSIDE if $INSTALL_CUDA)
     # This runs regardless of whether we just installed CUDA or it was already installed
     if [ -d "/usr/local/cuda" ]; then
@@ -3139,7 +3139,7 @@ BASHCUDA
             info "Check available CUDA versions: ls -la /usr/local/ | grep cuda"
         fi
     fi
-    
+
 else
     log "Skipping NVIDIA installation"
 fi
@@ -3151,7 +3151,7 @@ section "${SYMBOL_ROCKET} Performance Tuning"
 
 if $PERFORMANCE_TUNING; then
     log "Applying performance optimizations..."
-    
+
     # System limits (optimized for 32GB RAM and ML/AI)
     cat > /etc/security/limits.d/99-wsl2-limits.conf <<EOF
 # WSL2 Performance Limits - High Performance (32GB RAM)
@@ -3325,7 +3325,7 @@ ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/read_ahead_kb}="1024"
 ACTION=="add|change", KERNEL=="sd[a-z]", ATTR{queue/rotational}=="0", ATTR{queue/rq_affinity}="2"
 EOF
-    
+
     log "Performance tuning applied"
 else
     log "Skipping performance tuning"
@@ -3338,10 +3338,10 @@ section "${SYMBOL_GEAR} Automatic Security Updates"
 
 if $ENABLE_AUTO_UPDATES; then
     log "Configuring automatic security updates..."
-    
+
     # Install unattended-upgrades with availability check
     common_safe_install unattended-upgrades apt-listchanges || warn "Automatic update packages were not installed"
-    
+
     common_render_debian_unattended_upgrades_conf > /etc/apt/apt.conf.d/50unattended-upgrades
     common_render_apt_periodic_auto_upgrades_conf > /etc/apt/apt.conf.d/20auto-upgrades
 

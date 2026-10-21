@@ -2448,7 +2448,7 @@ show_menu() {
     prompt_yn "Install Go (Latest)" true && INSTALL_GO=true || INSTALL_GO=false
     prompt_yn "Install Node.js (LTS via fnm)" true && INSTALL_NODE=true || INSTALL_NODE=false
 
-    
+
     subsection "File Sharing"
     SAMBA_SHARE_NAME="SSD_Storage"
     prompt_yn "Install Samba File Sharing" false && INSTALL_SAMBA=true || INSTALL_SAMBA=false
@@ -2494,7 +2494,7 @@ if $UPDATE_SYSTEM; then
 
     common_apt_update "system update"
     common_apt_get upgrade -y
-    
+
     if $INSTALL_BASE_UTILS; then
         log "Installing essential packages..."
         # Combined list from VPS + specific needs
@@ -2505,7 +2505,7 @@ if $UPDATE_SYSTEM; then
             fzf ripgrep fd-find bat bc needrestart ncdu tree vim nano tmux \
             make gcc g++ cmake xz-utils xdg-user-dirs || \
             warn "Some essential packages were not installed, continuing"
-            
+
         # Aliases for bat and fd
         if [ -f /usr/bin/batcat ] && [ ! -f /usr/bin/bat ]; then
             ln -sf /usr/bin/batcat /usr/bin/bat 2>/dev/null || true
@@ -2513,7 +2513,7 @@ if $UPDATE_SYSTEM; then
         if [ -f /usr/bin/fdfind ] && [ ! -f /usr/bin/fd ]; then
             ln -sf /usr/bin/fdfind /usr/bin/fd 2>/dev/null || true
         fi
-        
+
         # Configure iptables-legacy for Docker compatibility
         # Switch ALL iptables utilities to legacy mode (critical for UFW)
         # Set master alternatives first
@@ -2536,7 +2536,7 @@ if $CONFIGURE_LOCALES; then
     echo "1) en_US.UTF-8 (English)"
     echo "2) ru_RU.UTF-8 (Russian)"
     echo "3) Both (en_US.UTF-8 as default)"
-    
+
     if ! LOCALE_CHOICE=$(tui_radiolist "Default Locale" "Select default language (both UTF-8 locales will be generated):" 15 60 3 "1" "English (en_US.UTF-8)" on "2" "Russian (ru_RU.UTF-8)" off "3" "Both (English as default)" off); then
         read -r -p "Enter choice [1-3]: " LOCALE_CHOICE
     fi
@@ -2607,26 +2607,26 @@ fi
 ################################################################################
 if $CREATE_USER; then
     section "${SYMBOL_GEAR} User Creation"
-    
+
     # Username validation function
     validate_username() {
         common_validate_username "${1:-}"
     }
-    
+
     echo ""
     info "We need to create a new sudo user for secure access."
     if $CONFIGURE_SECURITY; then
         info "Root login will be disabled after setup."
     fi
     echo ""
-    
+
     # Username input with validation and retry
     while true; do
         read -r -p "Enter new username: " NEW_USER
-        
+
         validate_username "$NEW_USER"
         validation_result=$?
-        
+
         if [ $validation_result -eq 0 ]; then
             break
         else
@@ -2641,7 +2641,7 @@ if $CREATE_USER; then
             echo ""
         fi
     done
-    
+
     # Check if user already exists
     if id "$NEW_USER" &>/dev/null; then
         warn "User $NEW_USER already exists. Skipping user creation..."
@@ -2651,7 +2651,7 @@ if $CREATE_USER; then
             /usr/sbin/usermod -aG sudo "$NEW_USER"
             log "Added existing user $NEW_USER to sudo group"
         fi
-        
+
         # Offer to change password for existing user
         echo ""
         read -p "Do you want to change password for existing user $NEW_USER? (y/N): " -n 1 -r
@@ -2679,11 +2679,11 @@ if $CREATE_USER; then
             error "Failed to create user $NEW_USER"
             exit 1
         }
-        
+
         # Add to sudo group
         /usr/sbin/usermod -aG sudo "$NEW_USER"
         log "User $NEW_USER created and added to sudo group"
-        
+
         # Set password for new user
         log "Setting password for new user $NEW_USER..."
         # Set password for new user
@@ -2702,7 +2702,7 @@ if $CREATE_USER; then
             fi
         done
     fi
-    
+
     # Store user for later use (adding to docker group, video/render groups)
     # Configure passwordless sudo for the new user
     if common_safe_write_sudoers "/etc/sudoers.d/$NEW_USER" "$NEW_USER ALL=(ALL) NOPASSWD:ALL"; then
@@ -2710,7 +2710,7 @@ if $CREATE_USER; then
     else
         warn "Failed to configure passwordless sudo for $NEW_USER (sudoers write or visudo check failed, is sudo installed?; the previous file, if any, is unchanged)"
     fi
-    
+
     # Configure passwordless sudo for root
     if ! grep -q "^root.*NOPASSWD:ALL" /etc/sudoers.d/root 2>/dev/null; then
         if common_safe_write_sudoers "/etc/sudoers.d/root" "root ALL=(ALL) NOPASSWD:ALL"; then
@@ -2719,7 +2719,7 @@ if $CREATE_USER; then
             warn "Failed to configure passwordless sudo for root (sudoers write or visudo check failed, is sudo installed?; the previous file, if any, is unchanged)"
         fi
     fi
-    
+
     # Setup SSH keys
     USER_HOME=$(common_user_home "$NEW_USER" || echo "/home/$NEW_USER")
     setup_ssh_access "$NEW_USER" "$USER_HOME"
@@ -2734,11 +2734,11 @@ fi
 ################################################################################
 if $INSTALL_KERNEL; then
     section "${SYMBOL_GEAR} Kernel & Hardware"
-    
+
     # N5095 Check
     CPU_MODEL=$(grep -m1 "model name" /proc/cpuinfo | cut -d':' -f2)
     log "Detected CPU: $CPU_MODEL"
-    
+
     # Remove legacy XanMod sources and keys if present
     if [ -e /etc/apt/sources.list.d/xanmod-release.list ]; then
         rm -f /etc/apt/sources.list.d/xanmod-release.list
@@ -2775,14 +2775,14 @@ if $INSTALL_KERNEL; then
         fi
         BACKPORTS_KERNEL_INSTALLED=false
     fi
-    
+
     # CPU Governor (schedutil is best for N5095)
     # linux-cpupower is available on Debian 12 and Debian 13
     common_safe_install linux-cpupower || warn "linux-cpupower was not installed, CPU governor tuning may be skipped"
 
     # Detect best available governor
     AVAILABLE_GOVERNORS=$(cpupower frequency-info -g 2>/dev/null | grep "available cpufreq governors:" | cut -d: -f2 || true)
-    
+
     if [[ "$AVAILABLE_GOVERNORS" == *"schedutil"* ]]; then
         GOVERNOR="schedutil"
     elif [[ "$AVAILABLE_GOVERNORS" == *"powersave"* ]]; then
@@ -2793,7 +2793,7 @@ if $INSTALL_KERNEL; then
     else
         GOVERNOR="performance"
     fi
-    
+
     log "Selected CPU Governor: $GOVERNOR"
 
     # Apply immediately
@@ -2821,7 +2821,7 @@ if $INSTALL_INTEL_GPU; then
     log "Installing Intel GPU Drivers..."
     mapfile -t intel_gpu_packages < <(resolve_intel_media_packages)
     common_safe_install "${intel_gpu_packages[@]}" || warn "Intel GPU drivers were not fully installed"
-    
+
     /usr/sbin/groupadd -f render
     /usr/sbin/groupadd -f video
     if [ -n "$NEW_USER" ] && [ "$NEW_USER" != "root" ]; then
@@ -2835,10 +2835,10 @@ fi
 ################################################################################
 if $OPTIMIZE_SSD; then
     section "${SYMBOL_GEAR} Storage Optimization"
-    
+
     systemctl enable fstrim.timer
     systemctl start fstrim.timer
-    
+
     log "Setting I/O schedulers (optimized for media server)..."
     cat > /etc/udev/rules.d/60-ioschedulers.conf <<'EOF'
 # I/O Scheduler optimization for Media Server
@@ -2934,9 +2934,9 @@ log "Features: Starship prompt, history (50k), aliases, fnm auto-switching"
 ################################################################################
 if $INSTALL_GO; then
     section "${SYMBOL_PACKAGE} Go Installation"
-    
+
     log "Installing Go programming language..."
-    
+
     # The pinned Go release, checked against its SHA-256 and swapped in only after unpacking
     if ! common_install_go; then
         error "Go installation failed"
@@ -2944,7 +2944,7 @@ if $INSTALL_GO; then
     fi
     GO_VERSION="$(head -n 1 /usr/local/go/VERSION)"
     GO_VERSION="${GO_VERSION#go}"
-    
+
     # Create profile.d entry
     cat > /etc/profile.d/golang.sh <<'GOEOF'
 export GOROOT=/usr/local/go
@@ -2952,7 +2952,7 @@ export GOPATH=$HOME/go
 export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
 GOEOF
     chmod +x /etc/profile.d/golang.sh
-    
+
     # Add to .bashrc for root
     if [ -f /root/.bashrc ] && ! grep -q "GOROOT" /root/.bashrc; then
         cat >> /root/.bashrc <<'GORC'
@@ -2963,7 +2963,7 @@ export GOPATH=$HOME/go
 export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
 GORC
     fi
-    
+
     # Add to .bashrc for new user
     USER_HOME=$(common_user_home "$NEW_USER" || echo "/home/$NEW_USER")
     if [ -f "$USER_HOME/.bashrc" ] && ! grep -q "GOROOT" "$USER_HOME/.bashrc"; then
@@ -2976,7 +2976,7 @@ export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
 GORC
         chown "$NEW_USER:$NEW_USER" "$USER_HOME/.bashrc"
     fi
-    
+
     log "Go ${GO_VERSION} installed successfully"
 fi
 
@@ -3013,13 +3013,13 @@ if $INSTALL_NODE; then
         warn "Skipping fnm/Node.js installation because required packages are still missing: ${unresolved_packages[*]}"
         return 1
     }
-    
+
     install_fnm_for_user() {
         local username=$1
         local user_home
         user_home=$(common_user_home "$username" || echo "/home/$username")
         log "Installing fnm for user: $username"
-        
+
         local fnm_dir fnm_install_script
         # The binary comes from the pinned fnm release; it and the setup script sit in a fresh
         # directory in /tmp (not root's TMPDIR, which the user may not reach) that only root can
@@ -3030,7 +3030,7 @@ if $INSTALL_NODE; then
             return 1
         fi
         fnm_install_script="$fnm_dir/fnm-setup.sh"
-        
+
         cat > "$fnm_install_script" <<'FNMINSTALL'
 #!/bin/bash
 set -e
@@ -3072,7 +3072,7 @@ FNMINSTALL
             su - "$username" -c "bash '$fnm_install_script' '$user_home' '$username' '$fnm_dir/fnm'"
         fi
         rm -rf "$fnm_dir"
-        
+
         if [ -f "$user_home/.bashrc" ] && ! grep -q "FNM_PATH" "$user_home/.bashrc"; then
              cat >> "$user_home/.bashrc" <<'FNMRC'
 
@@ -3103,7 +3103,7 @@ FNMRC
         rm -f "$fnm_install_script"
         log "fnm setup completed for $username"
     }
-    
+
     if ensure_fnm_install_dependencies; then
         install_fnm_for_user root || warn "fnm installation for root failed"
         if [ -n "${NEW_USER:-}" ] && [ "$NEW_USER" != "root" ]; then
@@ -3120,7 +3120,7 @@ if $INSTALL_DOCKER; then
     for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
         common_apt_get remove -y "$pkg" 2>/dev/null || true
     done
-    
+
     install -m 0755 -d /etc/apt/keyrings
     # Docker's GPG key, accepted only with its pinned fingerprint
     if ! common_install_apt_key docker /etc/apt/keyrings/docker.gpg; then
@@ -3128,7 +3128,7 @@ if $INSTALL_DOCKER; then
         exit 1
     fi
     DOCKER_ARCH="$(dpkg --print-architecture)"
-    
+
     common_render_docker_debian_source "$ID" "$VERSION_CODENAME" "$DOCKER_ARCH" "/etc/apt/keyrings/docker.gpg" > /etc/apt/sources.list.d/docker.sources
     common_apt_sources_changed
 
@@ -3159,11 +3159,11 @@ EOF
     # Override socket for proper startup
     mkdir -p /etc/systemd/system/docker.service.d
     echo -e "[Service]\nExecStart=\nExecStart=/usr/bin/dockerd -H unix:///var/run/docker.sock" > /etc/systemd/system/docker.service.d/override.conf
-    
+
     systemctl daemon-reload
     systemctl enable docker
     systemctl start docker
-    
+
     [ -n "$NEW_USER" ] && /usr/sbin/usermod -aG docker "$NEW_USER"
 fi
 
@@ -3172,7 +3172,7 @@ fi
 ################################################################################
 if $PERFORMANCE_TUNING; then
     section "Step 9: Performance Tuning"
-    
+
     # RAM Detection
     TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     # Use awk for accurate calculation with rounding
@@ -3190,7 +3190,7 @@ if $PERFORMANCE_TUNING; then
             SWAP_SIZE=2
         fi
     fi
-    
+
     setup_swap_file "$SWAP_SIZE"
     [ "$SWAP_FILE_STATE" != unchanged ] || warn "Swap file not resized to ${SWAP_SIZE}GB; the previous swap stays"
 
@@ -3297,7 +3297,7 @@ net.ipv4.conf.default.accept_redirects = 0
 
 EOF
 
-    
+
     # Fix IRQ Storm on JasperLake/N5095 (High CPU usage on one core)
     log "Applying blacklist for problematic drivers (IRQ Storm Fix)..."
     cat > /etc/modprobe.d/blacklist-minipc.conf <<EOF
@@ -3340,7 +3340,7 @@ EOF
     mkdir -p /etc/systemd/journald.conf.d/
     echo -e "[Journal]\nSystemMaxUse=500M" > /etc/systemd/journald.conf.d/00-size.conf
     systemctl restart systemd-journald
-    
+
     # Tmpfs optimization
     if ! grep -q "tmpfs /tmp" /etc/fstab; then
         log "Optimizing tmpfs..."
@@ -3369,18 +3369,18 @@ fi
 ################################################################################
 if $CONFIGURE_SECURITY; then
     section "Step 11: Security"
-    
+
     /usr/sbin/ufw default deny incoming
     /usr/sbin/ufw default allow outgoing
     /usr/sbin/ufw allow 22/tcp
     /usr/sbin/ufw allow 80/tcp
     /usr/sbin/ufw allow 443/tcp
     /usr/sbin/ufw --force enable
-    
+
     # Fail2Ban
     write_fail2ban_jail_local
     systemctl restart fail2ban
-    
+
     # Auto Updates
     common_render_apt_periodic_auto_upgrades_conf > /etc/apt/apt.conf.d/20auto-upgrades
 fi
@@ -3390,7 +3390,7 @@ fi
 ################################################################################
 if $INSTALL_SAMBA; then
     section "Step 12: Samba"
-    
+
     # Check if the share directory exists
     if [ ! -d "$SAMBA_SHARE_PATH" ]; then
         warn "Directory $SAMBA_SHARE_PATH does not exist! Skipping Samba configuration."
@@ -3400,10 +3400,10 @@ if $INSTALL_SAMBA; then
             error "Samba installation failed"
             exit 1
         }
-        
+
         # Backup config
         [ ! -f "$SAMBA_CONF.bak" ] && cp "$SAMBA_CONF" "$SAMBA_CONF.bak"
-        
+
         # Configure global settings (Enable SMB2+ for modern clients)
         if ! grep -q "server min protocol" "$SAMBA_CONF"; then
             sed -i '/\[global\]/a \   server min protocol = SMB2' "$SAMBA_CONF"
@@ -3416,21 +3416,21 @@ if $INSTALL_SAMBA; then
 
         # Disable the default [homes] share (only that section, other sections keep their lines)
         disable_samba_homes_section "$SAMBA_CONF"
-        
+
         ensure_samba_share "$SAMBA_CONF" "$SAMBA_SHARE_NAME" "$SAMBA_SHARE_PATH" "$NEW_USER"
-        
+
         log "Samba configured. Please set SMB password for user: $NEW_USER"
         log "Note: This password can be different from system password."
-        
+
         # Retry loop for password
         while ! smbpasswd -a "$NEW_USER"; do
             warn "Password setting failed (mismatch?). Please try again."
             echo ""
         done
-        
+
         systemctl restart smbd
         log "Samba service restarted."
-        
+
         # Firewall rule for Samba (now that package is installed and profile exists)
         configure_samba_firewall
     fi

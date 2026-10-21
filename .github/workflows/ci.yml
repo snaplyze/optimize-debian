@@ -39,9 +39,6 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0, resolved 2026-10-20
         with:
           persist-credentials: false
-          # A pull request checks out its merge commit; its first parent is the base for the
-          # whitespace check.
-          fetch-depth: 2
       - name: ShellCheck
         # ShellCheck is the release pinned in .github/shellcheck.txt, from its GitHub release and
         # checked by the SHA-256 written there. Only the archive stays in the user's cache, outside
@@ -81,7 +78,3 @@ jobs:
       - name: Tests
         # The runner's user must not be root: tests/test_root_privileges_check.sh skips under root.
         run: for t in tests/*.sh; do bash "$t" || exit 1; done
-      - name: Whitespace
-        # Only what the pull request adds: older files still carry trailing whitespace.
-        if: github.event_name == 'pull_request'
-        run: git diff --check HEAD^1 HEAD

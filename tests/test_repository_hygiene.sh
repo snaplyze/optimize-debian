@@ -24,6 +24,41 @@ test_no_crlf_in_shell_or_docs() {
     )
 }
 
+# The files of the tree under root, relative to it, one per line. In a git work tree these are
+# the files git tracks or does not ignore (a local .idea/ or an ignored draft must not fail the
+# test; a deleted but still tracked file is skipped); without .git (a `git archive`) every file.
+list_repository_files() {
+    local root="$1" file
+
+    if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        while IFS= read -r -d '' file; do
+            if [ -f "$root/$file" ]; then
+                printf '%s\n' "$file"
+            fi
+        done < <(git -C "$root" ls-files -z --cached --others --exclude-standard)
+    else
+        (cd "$root" && find . -path './.git' -prune -o -type f -printf '%P\n')
+    fi | sort
+}
+
+# Every file grep -I takes for text: no trailing whitespace, no blank line at the end of the file
+# (what `git diff --check` reports as blank-at-eof).
+test_no_trailing_whitespace() {
+    local file lines
+    local -a offenders=()
+
+    while IFS= read -r file; do
+        LC_ALL=C grep -Iq '' "$ROOT_DIR/$file" || continue
+        # grep returns 1 for a clean file, which pipefail would turn into a failure.
+        lines="$({ LC_ALL=C grep -nE '[[:space:]]+$' "$ROOT_DIR/$file" || true; } | cut -d: -f1 | paste -sd ',' -)"
+        [ -z "$lines" ] || offenders+=("$file: trailing whitespace on lines $lines")
+        if [ -z "$(tail -c 2 "$ROOT_DIR/$file" | tr -d '\n')" ]; then
+            offenders+=("$file: blank line at the end of the file")
+        fi
+    done < <(list_repository_files "$ROOT_DIR")
+    [ "${#offenders[@]}" -eq 0 ] || fail "whitespace errors:"$'\n'"$(printf '%s\n' "${offenders[@]}")"
+}
+
 test_shell_scripts_parse() {
     local file
 
@@ -101,6 +136,7 @@ test_optimizer_visual_shell_uses_clean_style() {
 
 main() {
     test_no_crlf_in_shell_or_docs
+    test_no_trailing_whitespace
     test_shell_scripts_parse
     test_optimizer_scripts_source_without_lib_directory
     test_optimizer_scripts_source_from_process_substitution
