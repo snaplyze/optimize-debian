@@ -241,7 +241,7 @@ Docker публикует порты через собственные сете�
 
 ## SSH baseline
 
-Скрипт применяет drop-in hardening в `/etc/ssh/sshd_config.d/99-amnezia-host-hardening.conf`:
+Скрипт применяет drop-in hardening в `/etc/ssh/sshd_config.d/00-amnezia-host-hardening.conf`:
 - `PermitRootLogin no`
 - `PasswordAuthentication no`
 - `PubkeyAuthentication yes`
@@ -251,6 +251,9 @@ Docker публикует порты через собственные сете�
 - `ClientAliveInterval 300`
 - `ClientAliveCountMax 2`
 - `MaxAuthTries 3`
+- `Port <ssh-port>`
+
+sshd берет первое прочитанное значение параметра, а drop-in читает по порядку имен, поэтому файл назван `00-…` и действует раньше других drop-in (например, `50-cloud-init.conf` с `PasswordAuthentication yes`). После `sshd -t` скрипт сверяет действующие значения через `sshd -T`; если их задает файл, прочитанный раньше, или `sshd_config` не подключает каталог drop-in, drop-in откатывается до изменения firewall и перезапуска SSH, а скрипт называет расходящиеся параметры и останавливается. Файл `99-amnezia-host-hardening.conf` прежних версий удаляется; файл с тем же именем, но другим содержимым остается.
 
 Если используется `--create-user`, ключи для нового пользователя берутся из `authorized_keys` invoking `sudo` user и добавляются без дублей. Если такого источника нет, можно передать ключ напрямую через `--ssh-public-key` или `--ssh-public-key-file`. Это позволяет не потерять доступ после отключения password login и ужесточения SSH. Права sudo для пользователя и root настраиваются атомарно через функцию безопасной записи с верификацией синтаксиса `visudo -cf`.
 

@@ -1334,3 +1334,43 @@ common_setup_bashrc() {
         chown "$user:" "$bashrc" 2>/dev/null || true
     fi
 }
+
+# SSH hardening drop-ins. For most keywords sshd keeps the first value it reads, and Debian's
+# sshd_config includes /etc/ssh/sshd_config.d/*.conf in name order before its own lines, so a
+# drop-in that sorts first (for example cloud-init's 50-cloud-init.conf before 99-*.conf) wins.
+# The hardening drop-ins are named 00-*.conf, and the values sshd takes are read back with sshd -T.
+
+# common_sshd_effective_mismatches <"keyword value">...: prints "keyword: expected <value>,
+# effective <values>" for each pair that `sshd -T` does not show. Keywords are lower case, as
+# sshd -T prints them; a keyword that takes several values (allowusers, port) matches when one of
+# them is the expected one. Match blocks are not applied. Returns 0 when every pair matches, 1 on
+# a mismatch and 2 when sshd -T fails.
+common_sshd_effective_mismatches() {
+    local effective pair keyword actual rc=0
+
+    effective="$(sshd -T 2>/dev/null)" || return 2
+    for pair in "$@"; do
+        grep -qxF -- "$pair" <<<"$effective" && continue
+        keyword="${pair%% *}"
+        actual="$(awk -v k="$keyword" '$1 == k { sub(/^[^ ]+ /, ""); v = v (v == "" ? "" : ", ") $0 } END { print v }' <<<"$effective")"
+        printf '%s: expected %s, effective %s\n' "$keyword" "${pair#* }" "${actual:-none}"
+        rc=1
+    done
+    return "$rc"
+}
+
+# common_sshd_legacy_dropin_is_ours <file>: <file> is a hardening drop-in that an earlier version
+# of these scripts wrote under a 99-*.conf name: it starts with the VPS or Amnezia header, or it is
+# exactly the four lines of the mini-PC. An operator's file with the same name is not ours.
+common_sshd_legacy_dropin_is_ours() {
+    local file="${1:-}"
+    local lines=()
+
+    [ -f "$file" ] && mapfile -t lines < "$file" 2>/dev/null || return 1
+    case "${lines[0]:-}" in
+        "# SSH Hardening - VPS Optimization" | "# Minimal Amnezia host SSH baseline") return 0 ;;
+    esac
+    [ "${#lines[@]}" -eq 4 ] && [ "${lines[0]}" = "PermitRootLogin no" ] &&
+        [ "${lines[1]}" = "PasswordAuthentication no" ] && [ "${lines[2]}" = "PubkeyAuthentication yes" ] &&
+        [[ "${lines[3]}" =~ ^AllowUsers\ [^[:space:]]+$ ]]
+}

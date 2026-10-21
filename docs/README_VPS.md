@@ -451,34 +451,33 @@ network-test.sh
 
 ## 🔧 Конфигурационные файлы
 
-### /etc/sysctl.d/99-custom.conf
+### Файлы, которые пишет скрипт
+- `/etc/sysctl.d/99-vps-optimization.conf` — значения из разделов «Сетевые настройки» и «Файловая система» выше
+- `/etc/security/limits.d/99-vps-limits.conf` — `nofile` и `nproc` 65535
+- `/etc/modules-load.d/99-vps-modules.conf` — модули, загружаемые при старте
+- `/etc/ssh/sshd_config.d/00-optimize-hardening.conf` — SSH-закалка
+
+### /etc/ssh/sshd_config.d/00-optimize-hardening.conf
 ```bash
-# BBR
-net.ipv4.tcp_congestion_control = bbr
-net.core.default_qdisc = fq
-
-# Память
-vm.swappiness = 10
-vm.vfs_cache_pressure = 50
-
-# Файлы
-fs.file-max = 2097152
-fs.inotify.max_user_watches = 524288
-
-# Сеть
-net.core.rmem_max = 16777216
-net.core.wmem_max = 16777216
-```
-
-### /etc/ssh/sshd_config
-```bash
-Port 22
 PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
-MaxAuthTries 3
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
 ClientAliveInterval 300
+ClientAliveCountMax 2
+MaxAuthTries 3
+MaxSessions 10
+AllowTcpForwarding yes
+AllowUsers <пользователь>
 ```
+
+sshd берет первое прочитанное значение параметра, а drop-in из `/etc/ssh/sshd_config.d/` читает по порядку имен, поэтому файл назван `00-…` и читается раньше остальных (например, `50-cloud-init.conf` с `PasswordAuthentication yes`). После `sshd -t` скрипт сверяет действующие значения через `sshd -T`: если их задает файл, прочитанный раньше, или `sshd_config` не подключает каталог drop-in, закалка откатывается, SSH не перезапускается, а скрипт называет расходящиеся параметры и останавливается. Файл `99-hardening.conf` прежних версий скрипта удаляется; файл с тем же именем, но другим содержимым остается.
 
 ## 🔄 Обновление и поддержка
 
