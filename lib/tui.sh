@@ -53,7 +53,13 @@ tui_install_gum() {
     mkdir -p "$gum_dir" 2>/dev/null || return 1
     [ -w "$gum_dir" ] || return 1
 
-    tmp_dir="$(mktemp -d)" || return 1
+    # A directory of common_temp_dir (lib/common.sh) is also removed when the script is
+    # interrupted; lib/tui.sh alone falls back to mktemp.
+    if declare -F common_temp_dir >/dev/null; then
+        common_temp_dir tmp_dir || return 1
+    else
+        tmp_dir="$(mktemp -d)" || return 1
+    fi
     dl_url="https://github.com/charmbracelet/gum/releases/download/v${TUI_GUM_VERSION}/gum_${TUI_GUM_VERSION}_Linux_${arch}.tar.gz"
 
     # HTTPS only and bounded in time, like common_download (lib/tui.sh does not need lib/common.sh).
