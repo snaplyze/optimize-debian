@@ -753,6 +753,49 @@ test_swap_enough_other_swap_skips_the_file() {
     '
 }
 
+test_swap_review_cases() {
+    # A kept file gets mode 600: swapped-out memory must not be readable by others.
+    run_case "$SWAP_MOCKS"'
+        seed_swapfile 2G 1
+        chmod 644 "$SWAPFILE_PATH"
+        setup_swap_file 2 > "$T/out" 2>&1
+        [ "$(stat -c %a "$SWAPFILE_PATH")" = 600 ] || die "a kept swap file must become 600"
+        [ "$SWAP_FILE_STATE" = kept ] || die "the state must be kept, got $SWAP_FILE_STATE"
+    '
+    # The operator swap line with its own fields and options stays as it is.
+    run_case "$SWAP_MOCKS"'
+        seed_swapfile 2G 0
+        printf "%s swap swap defaults,pri=5 0 0\n" "$SWAPFILE_PATH" >> "$FSTAB_FILE"
+        run_status setup_swap_file 2
+        assert_rc 0 "an operator fstab line"
+        grep -Fxq "$SWAPFILE_PATH swap swap defaults,pri=5 0 0" "$FSTAB_FILE" || die "the operator fstab line must stay: $(cat "$FSTAB_FILE")"
+        assert_one_fstab_line
+    '
+    # An fstab without a final newline gets ours on a line of its own.
+    run_case "$SWAP_MOCKS"'
+        printf "UUID=abc / ext4 defaults 0 1" > "$FSTAB_FILE"
+        setup_swap_file 2 > "$T/out" 2>&1
+        assert_one_fstab_line
+        [ "$SWAP_FILE_STATE" = created ] || die "the state must be created, got $SWAP_FILE_STATE"
+    '
+    # A failed swapoff leaves the state unchanged for the messages of the caller.
+    run_case "$SWAP_MOCKS"'
+        seed_swapfile 1G 1
+        export SWAPOFF_FAIL=1
+        setup_swap_file 2 >/dev/null 2>&1
+        [ "$SWAP_FILE_STATE" = unchanged ] || die "the state must be unchanged, got $SWAP_FILE_STATE"
+    '
+    # Something that is not a regular file is left alone.
+    run_case "$SWAP_MOCKS"'
+        mkdir "$SWAPFILE_PATH"
+        run_status setup_swap_file 2
+        assert_rc 0 "a directory at the swap file path"
+        assert_out "not a regular file" "the skipped path must be named"
+        assert_no_event_matches "^(swapoff|mkswap|swapon|fallocate|dd) "
+        [ -d "$SWAPFILE_PATH" ] || die "the directory must stay"
+    '
+}
+
 main() {
     test_dead_helpers_removed
     test_steps_use_the_helpers
@@ -777,6 +820,7 @@ main() {
     test_swap_failed_swapoff_keeps_the_active_file
     test_swap_created_once_and_kept_on_a_second_run
     test_swap_falls_back_to_dd
+    test_swap_review_cases
     test_swap_enough_other_swap_skips_the_file
     printf 'PASS: mini PC step tests\n'
 }
